@@ -7,6 +7,8 @@
 // @match        https://www.roblox.com/games/*
 // @match        https://web.roblox.com/games/*
 // @icon         https://www.roblox.com/favicon.ico
+// @downloadURL  https://raw.githubusercontent.com/pushurt3mprr/roblox-jobid-join/main/roblox-jobid-join.user.js
+// @updateURL    https://raw.githubusercontent.com/pushurt3mprr/roblox-jobid-join/main/roblox-jobid-join.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
