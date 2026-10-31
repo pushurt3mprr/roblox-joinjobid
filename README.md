@@ -4,7 +4,7 @@ based off of https://github.com/DaRealRomz/roblox-jobid-join
 
 ## what is this?
 
-this is a simple userscript script that allows you to join specific jobids from a gui in the server list.
+this is a simple userscript that allows you to join specific jobids from a gui in the server list.
 
 ## how do i install it?
 
