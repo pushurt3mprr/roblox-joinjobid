@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Roblox Multi-Tool & Job ID Joiner
 // @namespace    https://github.com/pushurt3mprr
-// @version      4.0.0
-// @description  Ultimate all-in-one Roblox toolkit for Firefox: Job ID Joiner, Spotlight Command Palette (Ctrl+K), Server Region/Version Inspector, Player Finder, VIP Link Vault, Account Switcher, Friends & Unfriend Tracker, Subplaces/Banned/Outfit Explorer, Rolimon's Trade & Economy Suite, Audio/Script Extractor, QoL & Playtime Heatmap.
+// @version      5.0.0
+// @description  Ultimate all-in-one Roblox toolkit for Firefox: Job ID Joiner, Spotlight Command Palette (Ctrl+K), Server Region/Version Inspector, Auto-Rejoin Watchdog, Player Finder, VIP Link Vault, Multi-Account Portfolio & Switcher, Friends & Unfriend Tracker, Subplaces/Groups/Banned/Outfit Explorer, Rolimon's Trade & Economy Suite, FFlag Generator, Audio/Script Extractor, QoL & Playtime Heatmap.
 // @author       pushurt3mprr
 // @match        https://*.roblox.com/*
 // @icon         https://www.roblox.com/favicon.ico
@@ -33,7 +33,7 @@
   /* ============================================================================
    * 1. CONSTANTS & UTILITIES
    * ============================================================================ */
-  const APP_VERSION = "4.0.0";
+  const APP_VERSION = "5.0.0";
   const TAB_ID = (typeof crypto !== "undefined" && crypto.randomUUID)
     ? crypto.randomUUID()
     : "tab-" + Math.random().toString(36).slice(2) + "-" + Date.now();
@@ -54,6 +54,7 @@
     FRIENDS_SNAPSHOT: "rtk_friends_snapshot_v4",
     ROLIMONS_CACHE: "rtk_rolimons_cache_v4",
     BLOCKLIST: "rtk_blocklist_v4",
+    RECENT_PLAYERS: "rtk_recent_players_v5",
   };
 
   const CURRENCY_MODES = {
@@ -71,6 +72,7 @@
     logoutGuard: true,
     restoreAccountAfterJoin: false,
     trackStudioTime: true,
+    autoRejoinWatchdog: false,
     ghostBackup: null,
     muteChatBackup: null,
     qolBlockAds: true,
@@ -939,15 +941,27 @@
           url: `https://economy.roblox.com/v2/users/${encodeURIComponent(userId)}/transaction-totals?timeFrame=${encodeURIComponent(timeFrame)}&transactionType=summary`,
         }).catch(() => ({ ok: false })),
       ]);
+      const robux = balRes.ok ? balRes.data?.robux ?? null : null;
+      const summary = sumRes.ok && sumRes.data ? sumRes.data : null;
       return {
-        robux: balRes.ok ? balRes.data?.robux ?? null : null,
-        summary: sumRes.ok && sumRes.data ? sumRes.data : null,
+        robux,
+        balance: robux,
+        summary,
+        totals: summary,
       };
     },
 
-    async getTradesList(tradeType = "inbound", limit = 25) {
+    async getRecentTransactions(userId, transactionType = "Sale", limit = 25) {
       const res = await this.request({
-        url: `https://trades.roblox.com/v1/trades/${encodeURIComponent(tradeType)}?limit=${limit}&sortOrder=Desc`,
+        url: `https://economy.roblox.com/v2/users/${encodeURIComponent(userId)}/transactions?transactionType=${encodeURIComponent(transactionType)}&limit=${limit}`,
+      }).catch(() => ({ ok: false }));
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+
+    async getTradesList(tradeType = "inbound", limit = 25) {
+      const cleanType = String(tradeType || "inbound").toLowerCase();
+      const res = await this.request({
+        url: `https://trades.roblox.com/v1/trades/${encodeURIComponent(cleanType)}?limit=${limit}&sortOrder=Desc`,
       });
       return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
     },
@@ -964,6 +978,68 @@
         method: "POST",
         url: `https://trades.roblox.com/v1/trades/${encodeURIComponent(tradeId)}/decline`,
       });
+    },
+
+    async getUserGroupsRoles(userId) {
+      const res = await this.request({
+        url: `https://groups.roblox.com/v1/users/${encodeURIComponent(userId)}/groups/roles`,
+      }).catch(() => ({ ok: false }));
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+
+    async getUserCreatedGames(userId) {
+      const res = await this.request({
+        url: `https://games.roblox.com/v2/users/${encodeURIComponent(userId)}/games?accessFilter=2&limit=25&sortOrder=Desc`,
+      }).catch(() => ({ ok: false }));
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+
+    async getGroupDetails(groupId) {
+      const res = await this.request({
+        url: `https://groups.roblox.com/v1/groups/${encodeURIComponent(groupId)}`,
+      });
+      if (!res.ok || !res.data) throw new Error(`Group ${groupId} not found (HTTP ${res.status}).`);
+      return res.data;
+    },
+
+    async getGroupRoles(groupId) {
+      const res = await this.request({
+        url: `https://groups.roblox.com/v1/groups/${encodeURIComponent(groupId)}/roles`,
+      }).catch(() => ({ ok: false }));
+      return res.ok && Array.isArray(res.data?.roles) ? res.data.roles : [];
+    },
+
+    async getGroupGames(groupId) {
+      const res = await this.request({
+        url: `https://games.roblox.com/v2/groups/${encodeURIComponent(groupId)}/games?accessFilter=2&limit=25&sortOrder=Desc`,
+      }).catch(() => ({ ok: false }));
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+
+    async getAvatarFullBodyThumb(userId) {
+      const res = await this.request({
+        url: `https://thumbnails.roblox.com/v1/users/avatar?userIds=${encodeURIComponent(userId)}&size=420x420&format=Png&isCircular=false`,
+      }).catch(() => ({ ok: false }));
+      return res.ok && res.data?.data?.[0]?.imageUrl ? res.data.data[0].imageUrl : "";
+    },
+
+    async getClientVersionInfo() {
+      const [playerRes, studioRes] = await Promise.all([
+        this.request({
+          url: "https://clientsettings.roblox.com/v2/client-version/WindowsPlayer",
+          withCredentials: false,
+        }).catch(() => ({ ok: false })),
+        this.request({
+          url: "https://clientsettings.roblox.com/v2/client-version/WindowsStudio64",
+          withCredentials: false,
+        }).catch(() => ({ ok: false })),
+      ]);
+      return {
+        playerVersion: playerRes.ok ? playerRes.data?.clientVersionUpload || playerRes.data?.version || "Unknown" : "Unavailable",
+        playerDisplay: playerRes.ok ? playerRes.data?.version || "" : "",
+        studioVersion: studioRes.ok ? studioRes.data?.clientVersionUpload || studioRes.data?.version || "Unknown" : "Unavailable",
+        studioDisplay: studioRes.ok ? studioRes.data?.version || "" : "",
+      };
     },
   };
 
@@ -1208,6 +1284,68 @@
       }
       await CookieBridge.deleteRoblosecurity();
       window.location.href = "https://www.roblox.com/login";
+    },
+
+    async scanAllAccountsPortfolio() {
+      await RolimonsEngine.ensureLoaded().catch(() => {});
+      const list = this.getList();
+      const numericIds = list.map((a) => a.userId).filter((id) => /^\d+$/.test(String(id)));
+      const presences = numericIds.length ? await RobloxAPI.getPresences(numericIds).catch(() => []) : [];
+      const presMap = {};
+      presences.forEach((p) => {
+        presMap[String(p.userId)] = p;
+      });
+
+      let totalRap = 0;
+      let totalValue = 0;
+      let totalRobux = 0;
+      let bannedCount = 0;
+
+      for (const acc of list) {
+        const uid = String(acc.userId);
+        if (!/^\d+$/.test(uid)) continue;
+        const [profile, colRaw, eco] = await Promise.all([
+          RobloxAPI.getUserProfile(uid).catch(() => null),
+          RobloxAPI.getUserCollectibles(uid).catch(() => ({ privateInventory: false, items: [], totalRap: 0 })),
+          this.activeUser && String(this.activeUser.id) === uid
+            ? RobloxAPI.getEconomySummary(uid, "Month").catch(() => null)
+            : Promise.resolve(null),
+        ]);
+
+        const col = RolimonsEngine.enrichCollectibles(colRaw);
+        const rap = col.totalRap || 0;
+        const val = col.totalValue || rap;
+        const isBanned = Boolean(profile?.isBanned);
+        const robux = eco?.balance != null ? eco.balance : acc.robuxBalance ?? null;
+        const pending = eco?.totals?.pendingRobuxTotal != null ? Math.abs(Number(eco.totals.pendingRobuxTotal)) : acc.pendingRobux ?? null;
+
+        totalRap += rap;
+        totalValue += val;
+        if (Number.isFinite(robux)) totalRobux += robux;
+        if (isBanned) bannedCount++;
+
+        this.saveEntry(
+          Object.assign({}, acc, {
+            username: profile?.name || acc.username,
+            displayName: profile?.displayName || acc.displayName,
+            isBanned,
+            rap,
+            rolimonsValue: val,
+            robuxBalance: robux,
+            pendingRobux: pending,
+            presence: presMap[uid] || null,
+            lastScannedAt: Date.now(),
+          })
+        );
+      }
+
+      return {
+        accountCount: list.length,
+        totalRap,
+        totalValue,
+        totalRobux,
+        bannedCount,
+      };
     },
   };
 
@@ -1907,11 +2045,40 @@
 
     clearActiveSession() {
       const pt = this.getData();
+      const droppedSession = pt.activeSession;
       if (pt.activeSession) {
         pt.activeSession = null;
         Store.set(STORAGE_KEYS.PLAYTIME, pt);
       }
       this.livePresence = null;
+
+      if (
+        droppedSession &&
+        droppedSession.presenceType === 2 &&
+        (droppedSession.placeId || droppedSession.rootPlaceId) &&
+        Store.getSettings().autoRejoinWatchdog &&
+        typeof HubUI !== "undefined"
+      ) {
+        const targetPlace = droppedSession.placeId || droppedSession.rootPlaceId;
+        const targetJob = droppedSession.gameId || null;
+        let cancelled = false;
+        HubUI.toast(
+          `Watchdog: Disconnected from ${droppedSession.name || "server"}. Auto-rejoining in 5s...`,
+          "info",
+          {
+            label: "Cancel",
+            onClick: () => {
+              cancelled = true;
+            },
+          },
+          5200
+        );
+        setTimeout(() => {
+          if (!cancelled && Store.getSettings().autoRejoinWatchdog) {
+            Launcher.join(targetPlace, targetJob, "current").catch(() => {});
+          }
+        }, 5000);
+      }
     },
 
     start() {
@@ -1979,22 +2146,20 @@
       const pt = this.getData();
       const hist = pt.dailyHistory || {};
       const days = [];
-      let maxSec = 1;
       for (let i = 27; i >= 0; i--) {
         const d = new Date(Date.now() - i * 86400000);
         const key = d.toISOString().slice(0, 10);
         const sec = Number(hist[key] || 0);
-        if (sec > maxSec) maxSec = sec;
         days.push({
+          dayKey: key,
           dateKey: key,
-          label: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+          dayNum: String(d.getDate()),
+          label: key.slice(5),
           seconds: sec,
+          level: sec <= 0 ? 0 : sec < 900 ? 1 : sec < 3600 ? 2 : sec < 10800 ? 3 : 4,
         });
       }
-      return days.map((d) => ({
-        ...d,
-        level: d.seconds <= 0 ? 0 : d.seconds < 900 ? 1 : d.seconds < 3600 ? 2 : d.seconds < 10800 ? 3 : 4,
-      }));
+      return days;
     },
   };
 
@@ -2320,6 +2485,15 @@
       const presences = await RobloxAPI.getPresences([user.id]).catch(() => []);
       const pres = presences[0];
       if (pres && String(pres.placeId) === String(placeId) && pres.gameId) {
+        RecentPlayersTracker.logPlayer({
+          userId: user.id,
+          username: user.name,
+          displayName: user.displayName,
+          avatarUrl: targetAvatarUrl,
+          placeId,
+          jobId: pres.gameId,
+          gameName: pres.lastLocation || `Place ${placeId}`,
+        });
         return {
           found: true,
           source: "presence",
@@ -2384,6 +2558,15 @@
                 const matchedJobId = String(thumb.requestId || "").split(":")[0];
                 const matchedServer = serverById[matchedJobId] || { id: matchedJobId };
                 this.activeAbort = null;
+                RecentPlayersTracker.logPlayer({
+                  userId: user.id,
+                  username: user.name,
+                  displayName: user.displayName,
+                  avatarUrl: targetAvatarUrl,
+                  placeId,
+                  jobId: matchedJobId,
+                  gameName: `Place ${placeId}`,
+                });
                 return {
                   found: true,
                   source: "scanner",
@@ -2535,14 +2718,17 @@
       const profile = await RobloxAPI.getUserProfile(userId);
       if (!profile) throw new Error(`User ID ${userId} does not exist.`);
 
-      const [avatars, presences, social, pastNames, collectibles, wearingIds, outfits] = await Promise.all([
+      const [avatars, fullBodyThumb, presences, social, pastNames, collectibles, wearingIds, outfits, groupsRoles, createdGames] = await Promise.all([
         RobloxAPI.getAvatars([userId]).catch(() => ({})),
+        RobloxAPI.getAvatarFullBodyThumb(userId).catch(() => ""),
         RobloxAPI.getPresences([userId]).catch(() => []),
         RobloxAPI.getUserSocialCounts(userId),
         RobloxAPI.getUsernameHistory(userId).catch(() => []),
         RobloxAPI.getUserCollectibles(userId).catch(() => ({ privateInventory: false, items: [], totalRap: 0 })),
         RobloxAPI.getCurrentlyWearing(userId).catch(() => []),
         RobloxAPI.getUserOutfits(userId).catch(() => []),
+        RobloxAPI.getUserGroupsRoles(userId).catch(() => []),
+        RobloxAPI.getUserCreatedGames(userId).catch(() => []),
       ]);
 
       await RolimonsEngine.ensureLoaded().catch(() => {});
@@ -2555,16 +2741,46 @@
         userId: String(profile.id),
         profile,
         avatarUrl: avatars[profile.id] || "",
+        fullBodyThumb: fullBodyThumb || avatars[profile.id] || "",
         presence: presences[0] || null,
         social,
         pastNames,
         collectibles: enrichedCollectibles,
         wearingIds,
         outfits,
+        groupsRoles,
+        createdGames,
         accountAgeDays,
         fetchedAt: Date.now(),
       };
       this.userCache[userId] = result;
+      return result;
+    },
+
+    groupCache: {},
+
+    async inspectGroup(rawGroupId, force = false) {
+      const gId = String(rawGroupId || "").trim().replace(/\D+/g, "");
+      if (!gId) throw new Error("Enter a valid numeric Group ID.");
+      if (!force && this.groupCache[gId] && Date.now() - this.groupCache[gId].fetchedAt < 60000) {
+        return this.groupCache[gId];
+      }
+
+      const [details, roles, games] = await Promise.all([
+        RobloxAPI.getGroupDetails(gId),
+        RobloxAPI.getGroupRoles(gId),
+        RobloxAPI.getGroupGames(gId),
+      ]);
+
+      const sortedRoles = [...roles].sort((a, b) => (b.rank || 0) - (a.rank || 0));
+      const result = {
+        groupId: gId,
+        details,
+        roles: sortedRoles,
+        games,
+        fetchedAt: Date.now(),
+      };
+      this.groupCache[gId] = result;
       return result;
     },
   };
@@ -2770,14 +2986,15 @@
       };
     },
 
-    async add({ url, label = "", gameName = "" }) {
+    async add({ url, label = "", gameName = "", placeIdFallback = "" }) {
       const parsed = this.parseVipUrl(url);
       if (!parsed) {
         throw new Error("Paste a valid Roblox Private Server link (?privateServerLinkCode=... or roblox.com/share?code=...).");
       }
+      const pId = parsed.placeId || String(placeIdFallback || "");
       let resolvedName = gameName;
-      if (!resolvedName && parsed.placeId) {
-        const uId = await RobloxAPI.getUniverseId(parsed.placeId).catch(() => null);
+      if (!resolvedName && pId) {
+        const uId = await RobloxAPI.getUniverseId(pId).catch(() => null);
         if (uId) {
           const meta = await RobloxAPI.getGameMeta([uId]).catch(() => ({}));
           resolvedName = meta[uId]?.name || "";
@@ -2787,9 +3004,9 @@
       const entry = {
         id: "vip_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6),
         url: parsed.url,
-        placeId: parsed.placeId,
+        placeId: pId,
         label: String(label || "").trim() || resolvedName || "VIP Server",
-        gameName: resolvedName || (parsed.placeId ? `Place ${parsed.placeId}` : "Shared Server"),
+        gameName: resolvedName || (pId ? `Place ${pId}` : "Shared Server"),
         addedAt: Date.now(),
       };
       list.unshift(entry);
@@ -2797,11 +3014,19 @@
       return entry;
     },
 
+    async addLink(opts) {
+      return this.add(opts);
+    },
+
     remove(id) {
       Store.set(
         STORAGE_KEYS.VIP_LINKS,
         this.getAll().filter((v) => v.id !== id)
       );
+    },
+
+    removeLink(id) {
+      this.remove(id);
     },
   };
 
@@ -2814,17 +3039,19 @@
       return this.getAll().some((g) => String(g.placeId) === String(placeId));
     },
 
-    async pin(placeId, folder = "Favorites") {
-      const pId = String(placeId || "").trim();
+    async pinGame(optsOrPlaceId, folderArg = "Favorites") {
+      const isObj = typeof optsOrPlaceId === "object" && optsOrPlaceId !== null;
+      const pId = String(isObj ? optsOrPlaceId.placeId : optsOrPlaceId || "").trim();
+      const folder = String(isObj ? optsOrPlaceId.folder || "Favorites" : folderArg || "Favorites").trim() || "Favorites";
       if (!/^\d+$/.test(pId)) throw new Error("Enter a valid numeric Place ID.");
       const uId = await RobloxAPI.getUniverseId(pId);
-      let name = `Place ${pId}`;
-      let iconUrl = "";
-      if (uId) {
+      let name = (isObj && optsOrPlaceId.name) || `Place ${pId}`;
+      let iconUrl = (isObj && optsOrPlaceId.iconUrl) || "";
+      if (uId && (!name || name.startsWith("Place ") || !iconUrl)) {
         const meta = await RobloxAPI.getGameMeta([uId]).catch(() => ({}));
         if (meta[uId]) {
           name = meta[uId].name || name;
-          iconUrl = meta[uId].iconUrl || "";
+          iconUrl = meta[uId].iconUrl || iconUrl;
         }
       }
       const list = this.getAll().filter((g) => String(g.placeId) !== pId);
@@ -2833,7 +3060,7 @@
         universeId: uId ? String(uId) : "",
         name,
         iconUrl,
-        folder: String(folder || "Favorites").trim() || "Favorites",
+        folder,
         addedAt: Date.now(),
       };
       list.unshift(entry);
@@ -2841,17 +3068,70 @@
       return entry;
     },
 
-    unpin(placeId) {
+    async pin(placeId, folder = "Favorites") {
+      return this.pinGame({ placeId, folder });
+    },
+
+    unpinGame(placeId) {
       Store.set(
         STORAGE_KEYS.GAME_PLAYLISTS,
         this.getAll().filter((g) => String(g.placeId) !== String(placeId))
       );
+    },
+
+    unpin(placeId) {
+      this.unpinGame(placeId);
+    },
+  };
+
+  const RecentPlayersTracker = {
+    getAll() {
+      return Store.get(STORAGE_KEYS.RECENT_PLAYERS, []);
+    },
+
+    logPlayer({ userId, name, username, displayName = "", avatarUrl = "", placeId = "", jobId = "", gameName = "", source = "Server" }) {
+      const resolvedName = name || username || "";
+      if (!userId || !resolvedName) return;
+      const uid = String(userId);
+      const list = this.getAll().filter((p) => String(p.userId) !== uid);
+      list.unshift({
+        userId: uid,
+        name: resolvedName,
+        username: resolvedName,
+        displayName: displayName || resolvedName,
+        avatarUrl,
+        placeId: String(placeId || ""),
+        jobId: String(jobId || ""),
+        gameName: gameName || (placeId ? `Place ${placeId}` : ""),
+        source,
+        metAt: Date.now(),
+      });
+      Store.set(STORAGE_KEYS.RECENT_PLAYERS, list.slice(0, 40));
+    },
+
+    clear() {
+      Store.set(STORAGE_KEYS.RECENT_PLAYERS, []);
     },
   };
 
   const FriendsTracker = {
     getAllSnapshots() {
       return Store.get(STORAGE_KEYS.FRIENDS_SNAPSHOT, {});
+    },
+
+    getAccountSnapshot(userId) {
+      if (!userId) return null;
+      const snap = this.getAllSnapshots()[String(userId)];
+      if (!snap) return null;
+      const map = snap.map || snap.friendsMap || {};
+      const events = Array.isArray(snap.events) ? snap.events : Array.isArray(snap.history) ? snap.history : [];
+      return {
+        map,
+        friendsMap: map,
+        events,
+        history: events,
+        updatedAt: snap.updatedAt || Date.now(),
+      };
     },
 
     async syncActiveAccountFriends() {
@@ -2872,7 +3152,7 @@
       });
 
       const store = this.getAllSnapshots();
-      const prev = store[uid] || { map: {}, events: [] };
+      const prev = this.getAccountSnapshot(uid) || { map: {}, events: [] };
       const nextMap = {};
       const events = Array.isArray(prev.events) ? [...prev.events] : [];
       const hadPrevSnapshot = Object.keys(prev.map || {}).length > 0;
@@ -2880,6 +3160,7 @@
       for (const f of friends) {
         nextMap[f.id] = {
           id: f.id,
+          userId: f.id,
           name: f.name,
           displayName: f.displayName || f.name,
           avatarUrl: avatars[f.id] || "",
@@ -2887,6 +3168,7 @@
         if (hadPrevSnapshot && !prev.map[f.id]) {
           events.unshift({
             type: "added",
+            id: f.id,
             userId: f.id,
             name: f.name,
             displayName: f.displayName || f.name,
@@ -2901,6 +3183,7 @@
           if (!nextMap[oldId]) {
             events.unshift({
               type: "unfriended",
+              id: oldId,
               userId: oldId,
               name: oldInfo.name,
               displayName: oldInfo.displayName || oldInfo.name,
@@ -2911,21 +3194,40 @@
         }
       }
 
+      const trimmedEvents = events.slice(0, 80);
       store[uid] = {
         map: nextMap,
-        events: events.slice(0, 80),
+        friendsMap: nextMap,
+        events: trimmedEvents,
+        history: trimmedEvents,
         updatedAt: Date.now(),
       };
       Store.set(STORAGE_KEYS.FRIENDS_SNAPSHOT, store);
 
       const enrichedFriends = friends
-        .map((f) => ({
-          id: f.id,
-          name: f.name,
-          displayName: f.displayName || f.name,
-          avatarUrl: avatars[f.id] || "",
-          presence: presMap[f.id] || { userPresenceType: 0, lastLocation: "Offline" },
-        }))
+        .map((f) => {
+          const pres = presMap[f.id] || { userPresenceType: 0, lastLocation: "Offline" };
+          if (pres.userPresenceType === 2 && pres.placeId) {
+            RecentPlayersTracker.logPlayer({
+              userId: f.id,
+              name: f.name,
+              displayName: f.displayName || f.name,
+              avatarUrl: avatars[f.id] || "",
+              placeId: pres.placeId,
+              jobId: pres.gameId || "",
+              gameName: pres.lastLocation || "",
+              source: "Friend In-Game",
+            });
+          }
+          return {
+            id: f.id,
+            userId: f.id,
+            name: f.name,
+            displayName: f.displayName || f.name,
+            avatarUrl: avatars[f.id] || "",
+            presence: pres,
+          };
+        })
         .sort((a, b) => {
           const pa = a.presence?.userPresenceType || 0;
           const pb = b.presence?.userPresenceType || 0;
@@ -2934,8 +3236,9 @@
         });
 
       return {
+        totalCount: enrichedFriends.length,
         friends: enrichedFriends,
-        events: store[uid].events,
+        events: trimmedEvents,
       };
     },
   };
@@ -2977,17 +3280,28 @@
       const rap = Number(row[2]) || 0;
       const rawVal = Number(row[3]);
       const value = rawVal > 0 ? rawVal : Number(row[4]) || rap;
+      const demandLabel = this.DEMAND_LABELS[String(row[5])] || "Normal";
+      const trendLabel = this.TREND_LABELS[String(row[6])] || "Stable";
+      const isProjected = row[7] === 1;
+      const isHyped = row[8] === 1;
+      const isRare = row[9] === 1;
       return {
         assetId: String(assetId),
         name: row[0] || `Item ${assetId}`,
         acronym: row[1] || "",
         rap,
         value,
-        demand: this.DEMAND_LABELS[String(row[5])] || "Normal",
-        trend: this.TREND_LABELS[String(row[6])] || "Stable",
-        isProjected: row[7] === 1,
-        isHyped: row[8] === 1,
-        isRare: row[9] === 1,
+        demandNum: Number(row[5]),
+        demand: demandLabel,
+        demandLabel,
+        trend: trendLabel,
+        trendLabel,
+        isProjected,
+        projected: isProjected,
+        isHyped,
+        hyped: isHyped,
+        isRare,
+        rare: isRare,
       };
     },
 
@@ -2999,6 +3313,7 @@
         const val = roli ? roli.value : Number(it.recentAveragePrice) || 0;
         totalValue += val;
         return Object.assign({}, it, {
+          rolimons: roli,
           rolimonsValue: val,
           demand: roli?.demand || "—",
           trend: roli?.trend || "—",
@@ -3013,7 +3328,8 @@
       });
     },
 
-    searchItems(query, limit = 12) {
+    async searchItems(query, limit = 12) {
+      await this.ensureLoaded().catch(() => {});
       const q = String(query || "").trim().toLowerCase();
       if (!q || !this.memoryItems) return [];
       const matches = [];
@@ -3027,6 +3343,31 @@
         }
       }
       return matches;
+    },
+
+    async getTopDeals(filterMode = "high_demand", limit = 15) {
+      await this.ensureLoaded().catch(() => {});
+      if (!this.memoryItems) return [];
+      const all = [];
+      for (const id of Object.keys(this.memoryItems)) {
+        const info = this.getItemInfo(id);
+        if (!info || info.rap <= 0) continue;
+        if (filterMode === "high_demand" && info.demandNum >= 3 && !info.isProjected) {
+          all.push(info);
+        } else if (filterMode === "undervalued" && info.value > info.rap * 1.12 && !info.isProjected) {
+          all.push(info);
+        } else if (filterMode === "projected" && info.isProjected) {
+          all.push(info);
+        } else if (filterMode === "rare" && info.isRare) {
+          all.push(info);
+        }
+      }
+      if (filterMode === "undervalued") {
+        all.sort((a, b) => b.value - b.rap - (a.value - a.rap));
+      } else {
+        all.sort((a, b) => b.value - a.value);
+      }
+      return all.slice(0, limit);
     },
 
     evaluateTradeOfferSide(offer) {
@@ -3053,7 +3394,7 @@
           isRare: Boolean(info?.isRare),
         };
       });
-      return { items, robux, rap, value, hasProjected };
+      return { items, robux, rap, value, totalRap: rap, totalValue: value, hasProjected };
     },
   };
 
@@ -3082,22 +3423,49 @@
 
   const ContentBlocker = {
     getRules() {
-      return Store.get(STORAGE_KEYS.BLOCKLIST, []);
+      const raw = Store.get(STORAGE_KEYS.BLOCKLIST, []);
+      if (!Array.isArray(raw)) return [];
+      return raw
+        .map((item, idx) => {
+          if (typeof item === "string") {
+            return {
+              id: `rule_${idx}_${item}`,
+              type: /^\d+$/.test(item) ? "placeId" : "keyword",
+              value: item,
+            };
+          }
+          if (item && typeof item === "object" && item.value) {
+            return {
+              id: item.id || `rule_${idx}_${item.value}`,
+              type: item.type || (/^\d+$/.test(String(item.value)) ? "placeId" : "keyword"),
+              value: String(item.value),
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
     },
 
-    addRule(raw) {
-      const clean = String(raw || "").trim();
-      if (!clean) return;
-      const list = this.getRules().filter((r) => r.toLowerCase() !== clean.toLowerCase());
-      list.unshift(clean);
+    addRule(ruleOrString) {
+      const isObj = typeof ruleOrString === "object" && ruleOrString !== null;
+      const value = String(isObj ? ruleOrString.value : ruleOrString || "").trim();
+      if (!value) throw new Error("Enter a keyword or Place ID to block.");
+      const type = isObj && ruleOrString.type ? ruleOrString.type : /^\d+$/.test(value) ? "placeId" : "keyword";
+      const list = this.getRules().filter((r) => r.value.toLowerCase() !== value.toLowerCase());
+      list.unshift({
+        id: "blk_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6),
+        type,
+        value,
+      });
       Store.set(STORAGE_KEYS.BLOCKLIST, list.slice(0, 100));
       this.applyDomFilter();
     },
 
-    removeRule(raw) {
+    removeRule(idOrValue) {
+      const target = String(idOrValue || "");
       Store.set(
         STORAGE_KEYS.BLOCKLIST,
-        this.getRules().filter((r) => r !== raw)
+        this.getRules().filter((r) => r.id !== target && r.value !== target)
       );
       document.querySelectorAll("[data-rtk-blocked]").forEach((el) => {
         el.style.display = "";
@@ -3108,7 +3476,7 @@
 
     applyDomFilter() {
       if (!Store.getSettings().qolContentBlocker) return;
-      const rules = this.getRules().map((r) => r.toLowerCase());
+      const rules = this.getRules();
       if (!rules.length) return;
 
       const tiles = document.querySelectorAll(
@@ -3117,12 +3485,65 @@
       tiles.forEach((tile) => {
         const text = (tile.textContent || "").toLowerCase();
         const link = tile.querySelector("a[href*='/games/']")?.getAttribute("href") || "";
-        const matched = rules.some((r) => text.includes(r) || link.includes(`/games/${r}`));
+        const matched = rules.some((r) => {
+          const val = r.value.toLowerCase();
+          return r.type === "placeId" ? link.includes(`/games/${val}`) : text.includes(val);
+        });
         if (matched) {
           tile.setAttribute("data-rtk-blocked", "1");
           tile.style.display = "none";
         }
       });
+    },
+  };
+
+  const FFlagGenerator = {
+    PRESETS: [
+      {
+        id: "fps240",
+        label: "Unlock 240 FPS Target",
+        desc: "Sets DFIntTaskSchedulerTargetFps to 240",
+        flags: { DFIntTaskSchedulerTargetFps: 240 },
+      },
+      {
+        id: "notelemetry",
+        label: "Reduce Client Telemetry",
+        desc: "Disables EventIngest & ephemeral counter reporting",
+        flags: {
+          FFlagDebugDisableTelemetryEphemeralCounter: true,
+          FFlagDebugDisableTelemetryEphemeralStat: true,
+          FFlagDebugDisableTelemetryEventIngest: true,
+          FFlagDebugDisableTelemetryPoint: true,
+        },
+      },
+      {
+        id: "lighting_phase3",
+        label: "Force Future Is Bright (Phase 3 Shadows)",
+        desc: "Enables Future lighting technology in supported places",
+        flags: { FFlagDebugForceFutureIsBrightPhase3: true },
+      },
+      {
+        id: "low_latency",
+        label: "DX11 Low-Latency Frame Queue",
+        desc: "Reduces render queue lag on Direct3D 11",
+        flags: { FFlagD3D11UseFrameLatencyWaitableObject: true },
+      },
+      {
+        id: "disable_titlebar",
+        label: "Disable Fullscreen Top Bar Delay",
+        desc: "Prevents accidental top-bar hover dropdown in fullscreen",
+        flags: { FIntFullscreenTitleBarTriggerDelayMillis: 3600000 },
+      },
+    ],
+
+    buildJson(selectedIds) {
+      const merged = {};
+      for (const preset of this.PRESETS) {
+        if (selectedIds.includes(preset.id)) {
+          Object.assign(merged, preset.flags);
+        }
+      }
+      return JSON.stringify(merged, null, 2);
     },
   };
 
@@ -3835,6 +4256,7 @@
     exploreMode: "experience",
     explorePlaceQuery: "",
     exploreUserQuery: "",
+    exploreGroupQuery: "",
     exploreExpSubtab: "places",
     exploreUnownedBadgesOnly: false,
     pendingDevAssetId: "",
@@ -3843,6 +4265,9 @@
     cmdFilteredActions: [],
     economyTimeFrame: "Month",
     tradeListType: "Inbound",
+    recentTxType: "Sale",
+    rolimonsDealMode: "high_demand",
+    portfolioSummary: null,
     customTradeGive: [],
     customTradeReceive: [],
     liveTickInterval: null,
@@ -4037,6 +4462,12 @@
           sub: "Lookup User Profile, RAP, Rolimon's Value & Outfits",
           badge: "User",
           run: () => this.openExplore({ mode: "user", query: q }),
+        });
+        actions.push({
+          title: `Inspect Group ID ${q}`,
+          sub: "View Group Roles, Member Ranks, Shout & Experiences",
+          badge: "Group",
+          run: () => this.openExplore({ mode: "group", query: q }),
         });
       } else if (q.length >= 2) {
         const cleanUser = q.replace(/^@/, "");
@@ -4242,6 +4673,7 @@
       this.exploreMode = mode;
       if (mode === "experience" && query) this.explorePlaceQuery = String(query);
       if (mode === "user" && query) this.exploreUserQuery = String(query);
+      if (mode === "group" && query) this.exploreGroupQuery = String(query);
       if (subtab) this.exploreExpSubtab = subtab;
       this.openTab("explore");
     },
@@ -4309,10 +4741,12 @@
     renderJoinerTab(body) {
       const pagePlaceId = Utils.getPlaceIdFromPage() || "";
       const recent = Store.get(STORAGE_KEYS.RECENT_SERVERS, []);
+      const recentPlayers = RecentPlayersTracker.getAll();
       const pinned = PinnedServers.getAll();
       const vipLinks = VipLinkVault.getAll();
       const currentUrlIsVip = VipLinkVault.parseVipUrl(window.location.href) ? window.location.href : "";
       const activeSession = PlaytimeTracker.getData().activeSession;
+      const settings = Store.getSettings();
 
       body.innerHTML = `
         <div class="rtk-card rtk-col">
@@ -4333,7 +4767,10 @@
           </div>
           <div class="rtk-col">
             <label class="rtk-label">Account</label>
-            <select class="rtk-select" id="j-account">${this.buildAccountOptionsHtml()}</select>
+            <div class="rtk-row">
+              <select class="rtk-select rtk-flex-1" id="j-account">${this.buildAccountOptionsHtml()}</select>
+              <button class="rtk-btn" id="j-random-alt-btn" title="Pick a random saved alt account and launch">${Icons.shuffle}<span>Random Alt</span></button>
+            </div>
           </div>
           <button class="rtk-btn rtk-btn-growth" id="j-launch-btn" style="height:40px;font-size:14px;margin-top:4px;">
             ${Icons.play}<span>Join Experience</span>
@@ -4343,6 +4780,13 @@
             <button class="rtk-btn rtk-btn-sm" id="j-smallest-btn">Smallest</button>
             <button class="rtk-btn rtk-btn-sm" id="j-ping-btn">Lowest Ping</button>
           </div>
+          <label class="rtk-switch-row" style="margin-top:2px;">
+            <div>
+              <div class="rtk-label">Auto-Rejoin Watchdog</div>
+              <div class="rtk-muted">Auto-reconnect to your exact Job ID if an active session drops unexpectedly</div>
+            </div>
+            ${renderToggleSwitch("j-watchdog-opt", settings.autoRejoinWatchdog)}
+          </label>
         </div>
 
         ${activeSession && activeSession.gameId ? `
@@ -4357,9 +4801,10 @@
             <div class="rtk-muted">${Utils.escapeHtml(activeSession.name || "In-Experience")}</div>
             <div class="rtk-code">${Utils.escapeHtml(activeSession.gameId)}</div>
             <div id="j-live-region-out" class="rtk-muted" style="display:none;"></div>
-            <div class="rtk-grid-2">
-              <button class="rtk-btn" id="j-copy-live-job">${Icons.copy}<span>Copy Job ID</span></button>
-              <button class="rtk-btn" id="j-copy-live-link">${Icons.link}<span>Copy Join Link</span></button>
+            <div class="rtk-grid-3">
+              <button class="rtk-btn rtk-btn-sm" id="j-copy-live-job">${Icons.copy}<span>Job ID</span></button>
+              <button class="rtk-btn rtk-btn-sm" id="j-copy-live-link">${Icons.link}<span>Join Link</span></button>
+              <button class="rtk-btn rtk-btn-sm" id="j-copy-live-discord">${Icons.copy}<span>Discord Card</span></button>
             </div>
           </div>
         ` : ""}
@@ -4448,6 +4893,26 @@
 
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
+            <span>Recent Players Met / Scanned (${recentPlayers.length})</span>
+            ${recentPlayers.length ? `<button class="rtk-btn rtk-btn-sm" id="j-clear-recent-players">Clear</button>` : ""}
+          </div>
+          ${recentPlayers.length === 0
+            ? `<div class="rtk-muted">Players located via the Token Scanner appear here with their server Job ID and timestamp.</div>`
+            : recentPlayers.slice(0, 12).map((rp) => `
+              <div class="rtk-acc-item">
+                <img class="rtk-avatar" src="${Utils.escapeHtml(rp.avatarUrl || "https://www.roblox.com/favicon.ico")}" alt="" />
+                <div class="rtk-flex-1">
+                  <div style="font-weight:700;" class="rtk-ellipsis">@${Utils.escapeHtml(rp.name || rp.username)}</div>
+                  <div class="rtk-muted rtk-ellipsis">${Utils.escapeHtml(rp.gameName || `Place ${rp.placeId}`)} · ${Utils.timeAgo(rp.metAt)}</div>
+                </div>
+                <button class="rtk-btn rtk-btn-sm" data-rp-lookup="${Utils.escapeHtml(rp.userId)}">Lookup</button>
+                ${rp.placeId && rp.jobId ? `<button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-rejoin-place="${Utils.escapeHtml(rp.placeId)}" data-rejoin-job="${Utils.escapeHtml(rp.jobId)}">Join</button>` : ""}
+              </div>
+            `).join("")}
+        </div>
+
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
             <span>Recent Servers</span>
             ${recent.length ? `<button class="rtk-btn rtk-btn-sm" id="j-clear-recent">Clear</button>` : ""}
           </div>
@@ -4481,6 +4946,28 @@
         } catch (err) {
           this.toast(err.message, "error");
         }
+      });
+
+      body.querySelector("#j-random-alt-btn")?.addEventListener("click", async () => {
+        const { placeId, jobId } = getInputs();
+        if (!placeId) return this.toast("Enter a Place ID first.", "error");
+        const curId = AccountManager.activeUser?.id ? String(AccountManager.activeUser.id) : "";
+        const alts = AccountManager.getList().filter((a) => String(a.userId) !== curId && !a.isBanned);
+        const pool = alts.length > 0 ? alts : AccountManager.getList();
+        if (!pool.length) return this.toast("Save at least one account in the Accounts tab first.", "error");
+        const chosen = pool[Math.floor(Math.random() * pool.length)];
+        body.querySelector("#j-account").value = String(chosen.userId);
+        try {
+          await Launcher.join(placeId, jobId || null, String(chosen.userId));
+          this.toast(`Launching as random alt @${chosen.username}...`, "success");
+        } catch (err) {
+          this.toast(err.message, "error");
+        }
+      });
+
+      body.querySelector("#j-watchdog-opt")?.addEventListener("change", (e) => {
+        Store.updateSettings({ autoRejoinWatchdog: e.target.checked });
+        this.toast(e.target.checked ? "Auto-Rejoin Watchdog armed." : "Auto-Rejoin Watchdog disabled.", "info");
       });
 
       body.querySelector("#j-pin-input-btn").addEventListener("click", async () => {
@@ -4576,6 +5063,14 @@
         const link = `https://www.roblox.com/games/${pId}/-?serverJobId=${activeSession.gameId}`;
         await Utils.copyText(link);
         this.toast("Copied shareable join link.", "success");
+      });
+
+      body.querySelector("#j-copy-live-discord")?.addEventListener("click", async () => {
+        const pId = activeSession.placeId || activeSession.rootPlaceId || pagePlaceId;
+        const link = `https://www.roblox.com/games/${pId}/-?serverJobId=${activeSession.gameId}`;
+        const md = `**${activeSession.name || "Roblox Server"}**\nPlace ID: \`${pId}\` · Job ID: \`${activeSession.gameId}\`\n[Click to Join Server Directly](<${link}>)`;
+        await Utils.copyText(md);
+        this.toast("Copied Discord invite markdown.", "success");
       });
 
       // VIP Link Vault handlers
@@ -4756,6 +5251,17 @@
         this.renderJoinerTab(body);
       });
 
+      body.querySelector("#j-clear-recent-players")?.addEventListener("click", () => {
+        RecentPlayersTracker.clear();
+        this.renderJoinerTab(body);
+      });
+
+      body.querySelectorAll("[data-rp-lookup]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          this.openExplore({ mode: "user", query: btn.dataset.rpLookup });
+        });
+      });
+
       body.querySelectorAll("[data-unpin-job]").forEach((btn) => {
         btn.addEventListener("click", () => {
           PinnedServers.unpin(btn.dataset.unpinJob);
@@ -4810,11 +5316,15 @@
       if (!this.exploreUserQuery && ctx.type === "user" && ctx.id) {
         this.exploreUserQuery = String(ctx.id);
       }
+      if (!this.exploreGroupQuery && ctx.type === "group" && ctx.id) {
+        this.exploreGroupQuery = String(ctx.id);
+      }
 
       body.innerHTML = `
         <div class="rtk-seg-bar">
-          <button class="rtk-seg-btn ${this.exploreMode === "experience" ? "active" : ""}" data-exp-mode="experience">Experience & Subplaces</button>
-          <button class="rtk-seg-btn ${this.exploreMode === "user" ? "active" : ""}" data-exp-mode="user">User, RAP & Banned Lookup</button>
+          <button class="rtk-seg-btn ${this.exploreMode === "experience" ? "active" : ""}" data-exp-mode="experience">Experience</button>
+          <button class="rtk-seg-btn ${this.exploreMode === "user" ? "active" : ""}" data-exp-mode="user">User & RAP</button>
+          <button class="rtk-seg-btn ${this.exploreMode === "group" ? "active" : ""}" data-exp-mode="group">Group & Roles</button>
         </div>
         <div id="exp-content" class="rtk-col"></div>
       `;
@@ -4829,6 +5339,8 @@
       const content = body.querySelector("#exp-content");
       if (this.exploreMode === "experience") {
         await this.renderExploreExperience(content);
+      } else if (this.exploreMode === "group") {
+        await this.renderExploreGroup(content);
       } else {
         await this.renderExploreUser(content);
       }
@@ -5155,6 +5667,7 @@
                   <div class="rtk-row" style="margin-top:6px;flex-wrap:wrap;">
                     <button class="rtk-btn rtk-btn-sm" id="exp-u-copy-id">${Icons.copy}<span>Copy ID</span></button>
                     ${!p.isBanned ? `<a class="rtk-btn rtk-btn-sm" href="https://www.roblox.com/users/${encodeURIComponent(p.id)}/profile" target="_blank" rel="noopener" style="text-decoration:none;">Profile</a>` : ""}
+                    ${u.fullBodyThumb ? `<a class="rtk-btn rtk-btn-sm" href="${Utils.escapeHtml(u.fullBodyThumb)}" target="_blank" rel="noopener" style="text-decoration:none;">420×420 PNG</a>` : ""}
                     ${u.presence?.placeId && u.presence?.gameId ? `<button class="rtk-btn rtk-btn-sm rtk-btn-growth" id="exp-u-join">${Icons.play}<span>Join Server</span></button>` : ""}
                   </div>
                 </div>
@@ -5251,6 +5764,43 @@
                 `).join("")}
               </div>
             ` : ""}
+
+            ${(u.createdGames || []).length > 0 ? `
+              <div class="rtk-card rtk-col">
+                <div class="rtk-card-title"><span>Created Experiences (${u.createdGames.length})</span></div>
+                ${u.createdGames.slice(0, 10).map((cg) => {
+                  const rPlace = cg.rootPlace?.id || "";
+                  return `
+                    <div class="rtk-acc-item">
+                      <div class="rtk-flex-1">
+                        <strong class="rtk-ellipsis">${Utils.escapeHtml(cg.name || `Universe ${cg.id}`)}</strong>
+                        <div class="rtk-muted">Visits: ${Utils.formatCompact(cg.placeVisits || 0)}${rPlace ? ` · Place ${Utils.escapeHtml(rPlace)}` : ""}</div>
+                      </div>
+                      ${rPlace ? `<button class="rtk-btn rtk-btn-sm" data-cg-inspect="${Utils.escapeHtml(rPlace)}">Inspect</button>` : ""}
+                      ${rPlace ? `<button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-cg-play="${Utils.escapeHtml(rPlace)}">Join</button>` : ""}
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            ` : ""}
+
+            ${(u.groupsRoles || []).length > 0 ? `
+              <div class="rtk-card rtk-col">
+                <div class="rtk-card-title"><span>User Groups & Ranks (${u.groupsRoles.length})</span></div>
+                ${u.groupsRoles.slice(0, 15).map((gr) => `
+                  <div class="rtk-acc-item">
+                    <div class="rtk-flex-1">
+                      <div class="rtk-row" style="gap:6px;">
+                        <strong class="rtk-ellipsis">${Utils.escapeHtml(gr.group?.name || "Group")}</strong>
+                        <span class="rtk-badge">${Utils.escapeHtml(gr.role?.name || "Member")} (${Utils.escapeHtml(gr.role?.rank ?? "?")})</span>
+                      </div>
+                      <div class="rtk-muted">${Utils.formatCompact(gr.group?.memberCount || 0)} members · Group ID ${Utils.escapeHtml(gr.group?.id)}</div>
+                    </div>
+                    <button class="rtk-btn rtk-btn-sm" data-grp-inspect="${Utils.escapeHtml(gr.group?.id)}">Inspect</button>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
           `;
 
           out.querySelector("#exp-u-copy-id")?.addEventListener("click", async () => {
@@ -5315,6 +5865,22 @@
           out.querySelectorAll("[data-wear-dev]").forEach((b) => {
             b.addEventListener("click", () => this.openDevAsset(b.dataset.wearDev));
           });
+          out.querySelectorAll("[data-cg-inspect]").forEach((b) => {
+            b.addEventListener("click", () => this.openExplore({ mode: "experience", query: b.dataset.cgInspect }));
+          });
+          out.querySelectorAll("[data-cg-play]").forEach((b) => {
+            b.addEventListener("click", async () => {
+              try {
+                await Launcher.join(b.dataset.cgPlay, null, "current");
+                this.toast("Launching experience...", "success");
+              } catch (err) {
+                this.toast(err.message, "error");
+              }
+            });
+          });
+          out.querySelectorAll("[data-grp-inspect]").forEach((b) => {
+            b.addEventListener("click", () => this.openExplore({ mode: "group", query: b.dataset.grpInspect }));
+          });
         } catch (err) {
           out.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
         }
@@ -5329,6 +5895,127 @@
       });
 
       loadUser(false);
+    },
+
+    async renderExploreGroup(container) {
+      container.innerHTML = `
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title"><span>Group, Roles, Shout & Group Games Inspector</span></div>
+          <div class="rtk-row">
+            <input class="rtk-input rtk-flex-1" id="exp-group-input" placeholder="Group ID (e.g. 7, 1200769)" value="${Utils.escapeHtml(this.exploreGroupQuery)}" />
+            <button class="rtk-btn rtk-btn-cta" id="exp-group-go">${Icons.search}<span>Inspect</span></button>
+          </div>
+        </div>
+        <div id="exp-group-result" class="rtk-col"></div>
+      `;
+
+      const out = container.querySelector("#exp-group-result");
+      const inp = container.querySelector("#exp-group-input");
+
+      const loadGroup = async (force = false) => {
+        const q = inp.value.trim();
+        if (!q) {
+          out.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Enter any Roblox Group ID above (or click a group from User Lookup) to inspect group roles, member counts per rank, shout, and group-owned experiences.</div></div>`;
+          return;
+        }
+        this.exploreGroupQuery = q;
+        out.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Loading group details, rank hierarchy, and group experiences...</div></div>`;
+        try {
+          const g = await ExplorerEngine.inspectGroup(q, force);
+          const d = g.details;
+          out.innerHTML = `
+            <div class="rtk-card rtk-col">
+              <div class="rtk-row" style="justify-content:space-between;align-items:flex-start;">
+                <div class="rtk-flex-1">
+                  <div class="rtk-row" style="gap:6px;flex-wrap:wrap;">
+                    <strong style="font-size:15px;">${Utils.escapeHtml(d.name)}</strong>
+                    ${d.hasVerifiedBadge ? `<span class="rtk-badge rtk-badge-live">Verified</span>` : ""}
+                    <span class="rtk-badge">${d.publicEntryAllowed ? "Public Join" : "Manual Approval"}</span>
+                  </div>
+                  <div class="rtk-muted">Group ID ${Utils.escapeHtml(d.id)} · Owner: ${d.owner ? `@${Utils.escapeHtml(d.owner.username || d.owner.displayName)}` : "None / No Owner"}</div>
+                </div>
+                <a class="rtk-btn rtk-btn-sm" href="https://www.roblox.com/communities/${encodeURIComponent(d.id)}/-" target="_blank" rel="noopener" style="text-decoration:none;">Open</a>
+              </div>
+              <div class="rtk-grid-2">
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Total Members</span>
+                  <span class="rtk-stat-val">${Utils.formatNumber(d.memberCount ?? 0)}</span>
+                </div>
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Roles / Experiences</span>
+                  <span class="rtk-stat-val">${g.roles.length} Roles · ${g.games.length} Games</span>
+                </div>
+              </div>
+              ${d.shout && d.shout.body ? `
+                <div class="rtk-col">
+                  <span class="rtk-label">Current Group Shout (@${Utils.escapeHtml(d.shout.poster?.username || "Poster")}):</span>
+                  <div class="rtk-code" style="white-space:pre-wrap;font-family:inherit;">${Utils.escapeHtml(d.shout.body)}</div>
+                </div>
+              ` : ""}
+            </div>
+
+            ${g.games.length > 0 ? `
+              <div class="rtk-card rtk-col">
+                <div class="rtk-card-title"><span>Group Experiences (${g.games.length})</span></div>
+                ${g.games.map((gm) => {
+                  const rPlace = gm.rootPlace?.id || "";
+                  return `
+                    <div class="rtk-acc-item">
+                      <div class="rtk-flex-1">
+                        <strong class="rtk-ellipsis">${Utils.escapeHtml(gm.name)}</strong>
+                        <div class="rtk-muted">Visits: ${Utils.formatCompact(gm.placeVisits || 0)}${rPlace ? ` · Place ${Utils.escapeHtml(rPlace)}` : ""}</div>
+                      </div>
+                      ${rPlace ? `<button class="rtk-btn rtk-btn-sm" data-gg-inspect="${Utils.escapeHtml(rPlace)}">Inspect</button>` : ""}
+                      ${rPlace ? `<button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-gg-play="${Utils.escapeHtml(rPlace)}">Join</button>` : ""}
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            ` : ""}
+
+            <div class="rtk-card rtk-col">
+              <div class="rtk-card-title"><span>Roles & Rank Hierarchy (${g.roles.length})</span></div>
+              ${g.roles.map((r) => `
+                <div class="rtk-acc-item">
+                  <div class="rtk-flex-1">
+                    <div class="rtk-row" style="gap:6px;">
+                      <strong>${Utils.escapeHtml(r.name)}</strong>
+                      <span class="rtk-badge">Rank ${Utils.escapeHtml(r.rank)}</span>
+                    </div>
+                    <div class="rtk-muted">${r.memberCount != null ? `${Utils.formatNumber(r.memberCount)} members` : ""} · Role ID ${Utils.escapeHtml(r.id)}</div>
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+          `;
+
+          out.querySelectorAll("[data-gg-inspect]").forEach((b) => {
+            b.addEventListener("click", () => this.openExplore({ mode: "experience", query: b.dataset.ggInspect }));
+          });
+          out.querySelectorAll("[data-gg-play]").forEach((b) => {
+            b.addEventListener("click", async () => {
+              try {
+                await Launcher.join(b.dataset.ggPlay, null, "current");
+                this.toast("Launching group experience...", "success");
+              } catch (err) {
+                this.toast(err.message, "error");
+              }
+            });
+          });
+        } catch (err) {
+          out.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
+        }
+      };
+
+      container.querySelector("#exp-group-go").addEventListener("click", () => loadGroup(true));
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          loadGroup(true);
+        }
+      });
+
+      loadGroup(false);
     },
 
     /* ---------------- TAB 2: ACCOUNT VAULT, SWITCHER & FRIENDS UNFRIEND TRACKER ---------------- */
@@ -5376,6 +6063,29 @@
           <div class="rtk-grid-2">
             <button class="rtk-btn rtk-btn-cta" id="acc-capture-now">Save Active Cookie</button>
             <button class="rtk-btn" id="acc-clean-login" title="Detaches current cookie without invalidating it on Roblox servers">${Icons.plus}<span>Add via Login</span></button>
+          </div>
+        </div>
+
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
+            <span>Multi-Account Portfolio & Ban Scanner</span>
+            <button class="rtk-btn rtk-btn-sm rtk-btn-cta" id="acc-scan-portfolio">${Icons.refresh}<span>Scan All Accounts</span></button>
+          </div>
+          <div id="acc-portfolio-box">
+            ${this.portfolioSummary ? `
+              <div class="rtk-grid-2">
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Combined Rolimon's Value</span>
+                  <span class="rtk-stat-val">R$ ${Utils.formatNumber(this.portfolioSummary.totalRolimonsValue)}</span>
+                  <span class="rtk-muted">Total RAP: R$ ${Utils.formatNumber(this.portfolioSummary.totalRap)}</span>
+                </div>
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Account Health (${this.portfolioSummary.accountsCount})</span>
+                  <span class="rtk-stat-val" style="font-size:13px;">${this.portfolioSummary.bannedCount ? `${this.portfolioSummary.bannedCount} Banned` : "All Active ✓"}</span>
+                  <span class="rtk-muted">Robux: R$ ${Utils.formatNumber(this.portfolioSummary.totalRobux)} (+${Utils.formatNumber(this.portfolioSummary.totalPending)} pend)</span>
+                </div>
+              </div>
+            ` : `<div class="rtk-muted">Click <b>Scan All Accounts</b> to check every saved account's Collectible RAP, Rolimon's Value, termination/ban status, and live presence.</div>`}
           </div>
         </div>
 
@@ -5462,11 +6172,13 @@
                     <div class="rtk-acc-item ${isCurrent ? "current" : ""}">
                       <img class="rtk-avatar" src="${Utils.escapeHtml(acc.avatarUrl || "https://www.roblox.com/favicon.ico")}" alt="" />
                       <div class="rtk-flex-1">
-                        <div class="rtk-row" style="gap:6px;">
+                        <div class="rtk-row" style="gap:6px;flex-wrap:wrap;">
                           <strong class="rtk-ellipsis">${Utils.escapeHtml(acc.displayName || acc.username)}</strong>
                           ${acc.note ? `<span class="rtk-badge">${Utils.escapeHtml(acc.note)}</span>` : ""}
+                          ${acc.isBanned ? `<span class="rtk-badge rtk-badge-danger">BANNED</span>` : ""}
+                          ${acc.rolimonsValue ? `<span class="rtk-badge rtk-badge-live">Val R$ ${Utils.formatCompact(acc.rolimonsValue)}</span>` : acc.rap ? `<span class="rtk-badge">RAP R$ ${Utils.formatCompact(acc.rap)}</span>` : ""}
                         </div>
-                        <div class="rtk-muted rtk-ellipsis">@${Utils.escapeHtml(acc.username)}</div>
+                        <div class="rtk-muted rtk-ellipsis">@${Utils.escapeHtml(acc.username)}${acc.robux != null ? ` · R$ ${Utils.formatNumber(acc.robux)}` : ""}</div>
                       </div>
                       <div class="rtk-row" style="gap:5px;">
                         ${isCurrent
@@ -5482,6 +6194,20 @@
           </div>
         </div>
       `;
+
+      body.querySelector("#acc-scan-portfolio")?.addEventListener("click", async (e) => {
+        const box = body.querySelector("#acc-portfolio-box");
+        e.currentTarget.disabled = true;
+        box.innerHTML = `<div class="rtk-muted">Scanning all saved accounts for Collectible RAP, Rolimon's Value, and Ban status...</div>`;
+        try {
+          this.portfolioSummary = await AccountManager.scanAllAccountsPortfolio();
+          this.toast("Scanned all saved accounts.", "success");
+          this.renderAccountsTab(body);
+        } catch (err) {
+          box.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
+          e.currentTarget.disabled = false;
+        }
+      });
 
       body.querySelector("#acc-sync-friends")?.addEventListener("click", async (e) => {
         const liveEl = body.querySelector("#acc-friends-live");
@@ -5762,6 +6488,43 @@
           </div>
           <div class="rtk-muted" id="eco-tax-summary">DevEx Cashout Value of 700 R$: <b>$2.45 USD</b> · Retail Purchase Cost of 1,000 R$: <b>$12.50 USD</b></div>
         </div>
+
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
+            <span>Rolimon's High-Demand & Deal Finder</span>
+            <div class="rtk-row">
+              <select class="rtk-select" id="eco-deal-mode" style="width:150px;height:28px;font-size:12px;">
+                <option value="high_demand" ${this.rolimonsDealMode === "high_demand" ? "selected" : ""}>Amazing / High Demand</option>
+                <option value="undervalued" ${this.rolimonsDealMode === "undervalued" ? "selected" : ""}>Value &gt; RAP Spread</option>
+                <option value="projected" ${this.rolimonsDealMode === "projected" ? "selected" : ""}>Projected Warning List</option>
+                <option value="rare" ${this.rolimonsDealMode === "rare" ? "selected" : ""}>Rare Limiteds</option>
+              </select>
+              <button class="rtk-btn rtk-btn-sm rtk-btn-cta" id="eco-load-deals">${Icons.search}<span>Load</span></button>
+            </div>
+          </div>
+          <div id="eco-deals-list" class="rtk-col">
+            <div class="rtk-muted">Browse top High-Demand Limiteds, items with Value above RAP, Rare items, or currently Projected items to avoid in trades.</div>
+          </div>
+        </div>
+
+        ${cur ? `
+          <div class="rtk-card rtk-col">
+            <div class="rtk-card-title">
+              <span>Recent Transactions Log</span>
+              <div class="rtk-row">
+                <select class="rtk-select" id="eco-tx-type" style="width:125px;height:28px;font-size:12px;">
+                  <option value="Sale" ${this.recentTxType === "Sale" ? "selected" : ""}>Sales of Goods</option>
+                  <option value="Purchase" ${this.recentTxType === "Purchase" ? "selected" : ""}>Purchases</option>
+                  <option value="GroupPayout" ${this.recentTxType === "GroupPayout" ? "selected" : ""}>Group Payouts</option>
+                </select>
+                <button class="rtk-btn rtk-btn-sm rtk-btn-cta" id="eco-load-tx">${Icons.refresh}<span>Fetch</span></button>
+              </div>
+            </div>
+            <div id="eco-tx-list" class="rtk-col">
+              <div class="rtk-muted">Click <b>Fetch</b> to inspect your recent Sales (including Pending Robux items), Purchases, or Group Payouts.</div>
+            </div>
+          </div>
+        ` : ""}
       `;
 
       const loadSummary = async () => {
@@ -5964,6 +6727,76 @@
         const gross = Math.ceil(net / 0.7);
         grossInput.value = String(gross);
         updateTaxNote(gross, net);
+      });
+
+      // Rolimon's Deal & High-Demand Finder
+      body.querySelector("#eco-deal-mode")?.addEventListener("change", (e) => {
+        this.rolimonsDealMode = e.target.value;
+      });
+      body.querySelector("#eco-load-deals")?.addEventListener("click", async (e) => {
+        const listEl = body.querySelector("#eco-deals-list");
+        e.currentTarget.disabled = true;
+        listEl.innerHTML = `<div class="rtk-muted">Loading Rolimon's market catalog...</div>`;
+        try {
+          const deals = await RolimonsEngine.getTopDeals(this.rolimonsDealMode, 20);
+          listEl.innerHTML = deals.map((d) => `
+            <div class="rtk-acc-item">
+              <div class="rtk-flex-1">
+                <div class="rtk-row" style="gap:6px;flex-wrap:wrap;">
+                  <strong class="rtk-ellipsis">${Utils.escapeHtml(d.name)}</strong>
+                  ${d.acronym ? `<span class="rtk-badge">${Utils.escapeHtml(d.acronym)}</span>` : ""}
+                  ${d.projected ? `<span class="rtk-badge rtk-badge-warn">PROJ</span>` : ""}
+                  ${d.rare ? `<span class="rtk-badge rtk-badge-live">RARE</span>` : ""}
+                </div>
+                <div class="rtk-muted">Val: R$ ${Utils.formatNumber(d.value)} · RAP: R$ ${Utils.formatNumber(d.rap)} · Demand: ${Utils.escapeHtml(d.demandLabel)}</div>
+              </div>
+              <a class="rtk-btn rtk-btn-sm" href="https://www.roblox.com/catalog/${encodeURIComponent(d.assetId)}/-" target="_blank" rel="noopener" style="text-decoration:none;">Catalog</a>
+            </div>
+          `).join("");
+        } catch (err) {
+          listEl.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
+        } finally {
+          e.currentTarget.disabled = false;
+        }
+      });
+
+      // Recent Transactions Log
+      body.querySelector("#eco-tx-type")?.addEventListener("change", (e) => {
+        this.recentTxType = e.target.value;
+      });
+      body.querySelector("#eco-load-tx")?.addEventListener("click", async (e) => {
+        if (!cur) return;
+        const listEl = body.querySelector("#eco-tx-list");
+        e.currentTarget.disabled = true;
+        listEl.innerHTML = `<div class="rtk-muted">Fetching recent ${Utils.escapeHtml(this.recentTxType)} transactions...</div>`;
+        try {
+          const txs = await RobloxAPI.getRecentTransactions(cur.id, this.recentTxType, 25);
+          if (!txs.length) {
+            listEl.innerHTML = `<div class="rtk-muted">No recent ${Utils.escapeHtml(this.recentTxType)} transactions found.</div>`;
+            return;
+          }
+          listEl.innerHTML = txs.slice(0, 20).map((tx) => {
+            const amt = Number(tx.currency?.amount || 0);
+            const itemName = tx.details?.name || tx.transactionType || "Transaction";
+            const agentName = tx.agent?.name || "Roblox";
+            return `
+              <div class="rtk-acc-item">
+                <div class="rtk-flex-1">
+                  <div class="rtk-row" style="gap:6px;flex-wrap:wrap;">
+                    <strong class="rtk-ellipsis">${Utils.escapeHtml(itemName)}</strong>
+                    ${tx.isPending ? `<span class="rtk-badge rtk-badge-warn">PENDING</span>` : ""}
+                  </div>
+                  <div class="rtk-muted">@${Utils.escapeHtml(agentName)} · ${Utils.formatDateShort(tx.created)}</div>
+                </div>
+                <span class="rtk-badge ${amt >= 0 ? "rtk-badge-live" : ""}">${amt >= 0 ? "+" : ""}R$ ${Utils.formatNumber(amt)}</span>
+              </div>
+            `;
+          }).join("");
+        } catch (err) {
+          listEl.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
+        } finally {
+          e.currentTarget.disabled = false;
+        }
       });
     },
 
@@ -6372,7 +7205,7 @@
           <div class="rtk-heatmap">
             ${heatmapDays.map((d) => `
               <div class="rtk-heat-cell ${d.level ? `rtk-heat-${d.level}` : ""}" title="${Utils.escapeHtml(d.dayKey)}: ${Utils.formatDuration(d.seconds)}">
-                <span>${Utils.escapeHtml(d.label.split("-")[1])}</span>
+                <span>${Utils.escapeHtml(d.dayNum || d.label.split("-")[1])}</span>
               </div>
             `).join("")}
           </div>
@@ -6542,6 +7375,29 @@
             `
             )
             .join("")}
+        </div>
+
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
+            <span>Roblox Live Build & FastFlag (FFlag) Builder</span>
+            <button class="rtk-btn rtk-btn-sm" id="dt-check-ver-btn">${Icons.refresh}<span>Live Builds</span></button>
+          </div>
+          <div id="dt-ver-out" class="rtk-muted">Generate <code>ClientAppSettings.json</code> for Bloxstrap / Roblox Player or check live WindowsPlayer &amp; Studio deployment versions.</div>
+          <div class="rtk-col" style="margin-top:4px;">
+            ${FFlagGenerator.PRESETS.map((p) => `
+              <label class="rtk-switch-row">
+                <div>
+                  <div class="rtk-label">${Utils.escapeHtml(p.label)}</div>
+                  <div class="rtk-muted">${Utils.escapeHtml(p.desc)}</div>
+                </div>
+                ${renderToggleSwitch(`fflag-${p.id}`, p.id === "fps_240" || p.id === "telemetry_off")}
+              </label>
+            `).join("")}
+          </div>
+          <div class="rtk-grid-2" style="margin-top:4px;">
+            <button class="rtk-btn rtk-btn-sm" id="dt-fflag-copy">${Icons.copy}<span>Copy JSON</span></button>
+            <button class="rtk-btn rtk-btn-sm rtk-btn-cta" id="dt-fflag-dl">${Icons.download}<span>ClientAppSettings.json</span></button>
+          </div>
         </div>
 
         <div class="rtk-card rtk-col">
@@ -6722,6 +7578,41 @@
             this.toast("Copied Luau snippet.", "success");
           }
         });
+      });
+
+      const getSelectedFFlagJson = () => {
+        const ids = FFlagGenerator.PRESETS
+          .filter((p) => body.querySelector(`#fflag-${p.id}`)?.checked)
+          .map((p) => p.id);
+        return FFlagGenerator.buildJson(ids);
+      };
+
+      body.querySelector("#dt-fflag-copy")?.addEventListener("click", async () => {
+        await Utils.copyText(getSelectedFFlagJson());
+        this.toast("Copied ClientAppSettings.json FastFlags.", "success");
+      });
+
+      body.querySelector("#dt-fflag-dl")?.addEventListener("click", () => {
+        const json = getSelectedFFlagJson();
+        DevTools.triggerBlobDownload(new TextEncoder().encode(json), "ClientAppSettings.json", "application/json");
+        this.toast("Downloaded ClientAppSettings.json.", "success");
+      });
+
+      body.querySelector("#dt-check-ver-btn")?.addEventListener("click", async (e) => {
+        const outEl = body.querySelector("#dt-ver-out");
+        e.currentTarget.disabled = true;
+        outEl.textContent = "Querying clientsettings.roblox.com for LIVE WindowsPlayer & Studio builds...";
+        try {
+          const v = await RobloxAPI.getClientVersionInfo();
+          outEl.innerHTML = `
+            <div class="rtk-kv-row"><span class="rtk-muted">WindowsPlayer</span><code>${Utils.escapeHtml(v.player?.clientVersionUpload || "Unavailable")} (${Utils.escapeHtml(v.player?.version || "?")})</code></div>
+            <div class="rtk-kv-row"><span class="rtk-muted">WindowsStudio64</span><code>${Utils.escapeHtml(v.studio?.clientVersionUpload || "Unavailable")} (${Utils.escapeHtml(v.studio?.version || "?")})</code></div>
+          `;
+        } catch (err) {
+          outEl.textContent = `Could not fetch build info: ${err.message}`;
+        } finally {
+          e.currentTarget.disabled = false;
+        }
       });
 
       body.querySelector("#dt-api-preset").addEventListener("change", (e) => {
