@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Roblox Multi-Tool & Job ID Joiner
 // @namespace    https://github.com/pushurt3mprr
-// @version      2.0.1
-// @description  All-in-one Roblox toolkit for Firefox: Job ID Joiner, Real-Time Account Switcher (.ROBLOSECURITY vault), Join As Account, Quick Privacy/Chat Settings, Playtime Tracker & Developer Tools.
+// @version      3.0.0
+// @description  Ultimate Roblox toolkit for Firefox: Job ID Joiner, Player Server Finder, Custom Server Browser, Account Switcher, Join As Account, Subplaces/Profile/RAP Explorer, Robux Converter, QoL Tweaks, Playtime Tracker & Dev Tools.
 // @author       pushurt3mprr
 // @match        https://*.roblox.com/*
 // @icon         https://www.roblox.com/favicon.ico
@@ -31,7 +31,7 @@
   /* ============================================================================
    * 1. CONSTANTS & UTILITIES
    * ============================================================================ */
-  const APP_VERSION = "2.0.1";
+  const APP_VERSION = "3.0.0";
   const TAB_ID = (typeof crypto !== "undefined" && crypto.randomUUID)
     ? crypto.randomUUID()
     : "tab-" + Math.random().toString(36).slice(2) + "-" + Date.now();
@@ -46,6 +46,17 @@
     PLAYTIME: "rtk_playtime_v2",
     PRESENCE_LEADER: "rtk_presence_leader_v2",
     RECENT_SERVERS: "rtk_recent_servers_v2",
+    PINNED_SERVERS: "rtk_pinned_servers_v3",
+  };
+
+  const CURRENCY_MODES = {
+    OFF: { label: "Disabled", rate: 0, symbol: "", suffix: "" },
+    USD_BUY: { label: "USD — Purchase Rate ($0.0125/R$)", rate: 0.0125, symbol: "$", suffix: "" },
+    USD_DEVEX: { label: "USD — DevEx Cashout ($0.0038/R$)", rate: 0.0038, symbol: "$", suffix: " DevEx" },
+    EUR_BUY: { label: "EUR — Purchase Rate (€0.0118/R$)", rate: 0.0118, symbol: "€", suffix: "" },
+    GBP_BUY: { label: "GBP — Purchase Rate (£0.0100/R$)", rate: 0.01, symbol: "£", suffix: "" },
+    BRL_BUY: { label: "BRL — Purchase Rate (R$0.068/R$)", rate: 0.068, symbol: "R$", suffix: "" },
+    CAD_BUY: { label: "CAD — Purchase Rate (CA$0.017/R$)", rate: 0.017, symbol: "CA$", suffix: "" },
   };
 
   const DEFAULT_SETTINGS = {
@@ -55,6 +66,13 @@
     trackStudioTime: true,
     ghostBackup: null,
     muteChatBackup: null,
+    qolBlockAds: true,
+    qolHideAppBanners: true,
+    qolWideLayout: false,
+    qolProfileStatsBar: true,
+    qolGameInsightsBar: true,
+    qolAssetQuickBar: true,
+    currencyMode: "USD_BUY",
   };
 
   const pageWin = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
@@ -111,6 +129,27 @@
       if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
       if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
       return `${Math.floor(diff / 86400)}d ago`;
+    },
+
+    formatNumber(n) {
+      if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+      return Number(n).toLocaleString();
+    },
+
+    formatCompact(n) {
+      const num = Number(n);
+      if (!Number.isFinite(num)) return "—";
+      if (num >= 1e9) return `${(num / 1e9).toFixed(1)}B`;
+      if (num >= 1e6) return `${(num / 1e6).toFixed(1)}M`;
+      if (num >= 1e3) return `${(num / 1e3).toFixed(1)}K`;
+      return String(num);
+    },
+
+    formatDateShort(iso) {
+      if (!iso) return "—";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "—";
+      return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
     },
 
     async copyText(text) {
@@ -616,6 +655,123 @@
       return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
     },
 
+    async getPublicServersPage(placeId, sortOrder = "Desc", limit = 100, cursor = "") {
+      const cursorParam = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+      const res = await this.request({
+        url: `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=${sortOrder}&limit=${limit}${cursorParam}`,
+      });
+      return {
+        data: res.ok && Array.isArray(res.data?.data) ? res.data.data : [],
+        nextPageCursor: res.ok ? res.data?.nextPageCursor || null : null,
+      };
+    },
+
+    async batchThumbnails(requests) {
+      const res = await this.request({
+        method: "POST",
+        url: "https://thumbnails.roblox.com/v1/batch",
+        body: requests,
+      });
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+
+    async resolveUsername(username) {
+      const res = await this.request({
+        method: "POST",
+        url: "https://users.roblox.com/v1/usernames/users",
+        body: { usernames: [String(username).trim()], excludeBannedUsers: false },
+      });
+      return res.ok && Array.isArray(res.data?.data) && res.data.data[0] ? res.data.data[0] : null;
+    },
+
+    async getUserProfile(userId) {
+      const res = await this.request({
+        url: `https://users.roblox.com/v1/users/${encodeURIComponent(userId)}`,
+      });
+      return res.ok && res.data?.id ? res.data : null;
+    },
+
+    async getUsernameHistory(userId) {
+      const res = await this.request({
+        url: `https://users.roblox.com/v1/users/${encodeURIComponent(userId)}/username-history?limit=50&sortOrder=Desc`,
+      });
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data.map((x) => x.name).filter(Boolean) : [];
+    },
+
+    async getUserCollectibles(userId) {
+      let cursor = "";
+      const all = [];
+      for (let page = 0; page < 3; page++) {
+        const res = await this.request({
+          url: `https://inventory.roblox.com/v1/users/${encodeURIComponent(userId)}/assets/collectibles?limit=100&sortOrder=Asc${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+        });
+        if (!res.ok) {
+          if (page === 0) return { privateInventory: res.status === 403, items: [], totalRap: 0 };
+          break;
+        }
+        if (Array.isArray(res.data?.data)) all.push(...res.data.data);
+        cursor = res.data?.nextPageCursor || "";
+        if (!cursor) break;
+      }
+      const totalRap = all.reduce((sum, item) => sum + (Number(item.recentAveragePrice) || 0), 0);
+      all.sort((a, b) => (Number(b.recentAveragePrice) || 0) - (Number(a.recentAveragePrice) || 0));
+      return { privateInventory: false, items: all, totalRap };
+    },
+
+    async getUserSocialCounts(userId) {
+      const [fr, fl, fw] = await Promise.all([
+        this.request({ url: `https://friends.roblox.com/v1/users/${userId}/friends/count` }).catch(() => ({ ok: false })),
+        this.request({ url: `https://friends.roblox.com/v1/users/${userId}/followers/count` }).catch(() => ({ ok: false })),
+        this.request({ url: `https://friends.roblox.com/v1/users/${userId}/followings/count` }).catch(() => ({ ok: false })),
+      ]);
+      return {
+        friends: fr.ok ? fr.data?.count ?? 0 : null,
+        followers: fl.ok ? fl.data?.count ?? 0 : null,
+        following: fw.ok ? fw.data?.count ?? 0 : null,
+      };
+    },
+
+    async getCurrentlyWearing(userId) {
+      const res = await this.request({
+        url: `https://avatar.roblox.com/v1/users/${encodeURIComponent(userId)}/currently-wearing`,
+      });
+      return res.ok && Array.isArray(res.data?.assetIds) ? res.data.assetIds : [];
+    },
+
+    async getUniversePlaces(universeId) {
+      const res = await this.request({
+        url: `https://develop.roblox.com/v1/universes/${encodeURIComponent(universeId)}/places?isUniverseCreation=false&limit=100&sortOrder=Asc`,
+      });
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+
+    async getGameVotes(universeIds) {
+      const res = await this.request({
+        url: `https://games.roblox.com/v1/games/votes?universeIds=${universeIds.join(",")}`,
+      });
+      const out = {};
+      if (res.ok && Array.isArray(res.data?.data)) {
+        res.data.data.forEach((v) => {
+          out[v.id] = v;
+        });
+      }
+      return out;
+    },
+
+    async getGamePasses(universeId) {
+      const res = await this.request({
+        url: `https://games.roblox.com/v1/games/${encodeURIComponent(universeId)}/game-passes?limit=100&sortOrder=Asc`,
+      });
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+
+    async getUniverseBadges(universeId) {
+      const res = await this.request({
+        url: `https://badges.roblox.com/v1/universes/${encodeURIComponent(universeId)}/badges?limit=25&sortOrder=Desc`,
+      });
+      return res.ok && Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+
     async getUserSettingsAndOptions() {
       const [flatRes, optRes] = await Promise.all([
         this.request({ url: "https://apis.roblox.com/user-settings-api/v1/user-settings" }).catch(() => ({ ok: false })),
@@ -1047,6 +1203,35 @@
         .sort((a, b) => a.ping - b.ping);
       if (!valid.length) throw new Error("No open servers with ping data reported right now.");
       const chosen = valid[0];
+      await this.join(placeId, chosen.id, targetAccountId);
+      return chosen;
+    },
+
+    async serverHop(placeId, targetAccountId = "current") {
+      const servers = await RobloxAPI.getPublicServers(placeId, "Desc", 100);
+      const activeJob = PlaytimeTracker.getData().activeSession?.gameId || "";
+      const recent = Store.get(STORAGE_KEYS.RECENT_SERVERS, [])
+        .filter((r) => String(r.placeId) === String(placeId))
+        .slice(0, 8)
+        .map((r) => r.jobId);
+      const excluded = new Set([activeJob, ...recent].filter(Boolean));
+
+      let candidates = servers.filter((s) => s.id && s.playing >= 1 && s.playing < s.maxPlayers && !excluded.has(s.id));
+      if (!candidates.length) {
+        candidates = servers.filter((s) => s.id && s.playing < s.maxPlayers && s.id !== activeJob);
+      }
+      if (!candidates.length) {
+        throw new Error("No alternate open servers available to hop into.");
+      }
+
+      candidates.sort((a, b) => {
+        const fpsDiff = Math.min(60, Math.round(b.fps || 60)) - Math.min(60, Math.round(a.fps || 60));
+        if (Math.abs(fpsDiff) > 8) return fpsDiff;
+        return (a.ping || 250) - (b.ping || 250);
+      });
+
+      const pool = candidates.slice(0, Math.min(6, candidates.length));
+      const chosen = pool[Math.floor(Math.random() * pool.length)];
       await this.join(placeId, chosen.id, targetAccountId);
       return chosen;
     },
@@ -1836,6 +2021,451 @@
   };
 
   /* ============================================================================
+   * 9B. PINNED SERVERS, PLAYER SERVER SCANNER, EXPLORER & SITE QOL ENGINES
+   * ============================================================================ */
+  const PinnedServers = {
+    getAll() {
+      return Store.get(STORAGE_KEYS.PINNED_SERVERS, []);
+    },
+
+    getForPlace(placeId) {
+      const all = this.getAll();
+      if (!placeId) return all;
+      return all.filter((p) => String(p.placeId) === String(placeId));
+    },
+
+    isPinned(jobId) {
+      const clean = Utils.sanitizeJobId(jobId);
+      return this.getAll().some((p) => p.jobId === clean);
+    },
+
+    async pin({ jobId, placeId, label = "", gameName = "" }) {
+      const cleanJob = Utils.sanitizeJobId(jobId);
+      if (!UUID_REGEX.test(cleanJob)) throw new Error("Enter a valid Server Job ID UUID to pin.");
+      if (!placeId || !/^\d+$/.test(String(placeId))) throw new Error("A valid Place ID is required to pin a server.");
+
+      let resolvedName = gameName;
+      if (!resolvedName) {
+        const uId = await RobloxAPI.getUniverseId(placeId).catch(() => null);
+        if (uId) {
+          const meta = await RobloxAPI.getGameMeta([uId]).catch(() => ({}));
+          resolvedName = meta[uId]?.name || "";
+        }
+      }
+
+      const list = this.getAll().filter((p) => p.jobId !== cleanJob);
+      const entry = {
+        jobId: cleanJob,
+        placeId: String(placeId),
+        label: String(label || "").trim(),
+        gameName: resolvedName || `Place ${placeId}`,
+        pinnedAt: Date.now(),
+      };
+      list.unshift(entry);
+      Store.set(STORAGE_KEYS.PINNED_SERVERS, list.slice(0, 50));
+      return entry;
+    },
+
+    unpin(jobId) {
+      const clean = Utils.sanitizeJobId(jobId);
+      const next = this.getAll().filter((p) => p.jobId !== clean);
+      Store.set(STORAGE_KEYS.PINNED_SERVERS, next);
+    },
+  };
+
+  const ServerScanner = {
+    activeAbort: null,
+
+    abort() {
+      if (this.activeAbort) {
+        this.activeAbort.aborted = true;
+        this.activeAbort = null;
+      }
+    },
+
+    async findPlayerInServers(placeId, usernameOrId, onProgress) {
+      if (!placeId || !/^\d+$/.test(String(placeId))) {
+        throw new Error("Enter a valid Place ID first.");
+      }
+      const query = String(usernameOrId || "").trim().replace(/^@/, "");
+      if (!query) throw new Error("Enter a Roblox username or User ID to search.");
+
+      this.abort();
+      const signal = { aborted: false };
+      this.activeAbort = signal;
+
+      // 1. Resolve target user
+      let user = null;
+      if (/^\d+$/.test(query)) {
+        user = await RobloxAPI.getUserProfile(query);
+      } else {
+        const resolved = await RobloxAPI.resolveUsername(query);
+        if (resolved?.id) {
+          user = await RobloxAPI.getUserProfile(resolved.id).catch(() => resolved);
+        }
+      }
+      if (!user || !user.id) {
+        throw new Error(`User "${query}" was not found on Roblox.`);
+      }
+
+      // 2. Fetch fresh 150x150 headshot URL for exact token comparison
+      const avatarRes = await RobloxAPI.request({
+        url: `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${user.id}&size=150x150&format=Png&isCircular=false`,
+      });
+      const targetAvatarUrl = avatarRes.ok && avatarRes.data?.data?.[0]?.imageUrl ? avatarRes.data.data[0].imageUrl : "";
+      if (!targetAvatarUrl) {
+        throw new Error(`Could not resolve @${user.name}'s avatar headshot thumbnail.`);
+      }
+
+      // 3. Fast-path check via Presence API (instant hit if user's joins are public)
+      const presences = await RobloxAPI.getPresences([user.id]).catch(() => []);
+      const pres = presences[0];
+      if (pres && String(pres.placeId) === String(placeId) && pres.gameId) {
+        return {
+          found: true,
+          source: "presence",
+          user,
+          avatarUrl: targetAvatarUrl,
+          server: { id: pres.gameId, playing: "?", maxPlayers: "?", ping: null, fps: null },
+          serversChecked: 1,
+          playersChecked: 1,
+        };
+      }
+
+      // 4. Deep scan public server playerTokens against batchThumbnails
+      let cursor = "";
+      let serversChecked = 0;
+      let playersChecked = 0;
+      const maxPages = 15;
+
+      for (let page = 1; page <= maxPages; page++) {
+        if (signal.aborted) throw new Error("Scan cancelled.");
+        const pageRes = await RobloxAPI.getPublicServersPage(placeId, "Desc", 100, cursor);
+        const servers = pageRes.data || [];
+        if (!servers.length) break;
+
+        const serverById = {};
+        const tokenItems = [];
+        for (const srv of servers) {
+          if (!srv.id) continue;
+          serverById[srv.id] = srv;
+          serversChecked++;
+          const tokens = Array.isArray(srv.playerTokens) ? srv.playerTokens : [];
+          for (let i = 0; i < tokens.length; i++) {
+            tokenItems.push({
+              requestId: `${srv.id}:${i}`,
+              targetId: 0,
+              token: tokens[i],
+              type: "AvatarHeadShot",
+              size: "150x150",
+              format: "Png",
+              isCircular: false,
+            });
+          }
+        }
+
+        playersChecked += tokenItems.length;
+        if (typeof onProgress === "function") {
+          onProgress({ page, serversChecked, playersChecked, username: user.name });
+        }
+
+        // Batch in chunks of 100, up to 3 requests in parallel
+        const batches = [];
+        for (let i = 0; i < tokenItems.length; i += 100) {
+          batches.push(tokenItems.slice(i, i + 100));
+        }
+
+        for (let b = 0; b < batches.length; b += 3) {
+          if (signal.aborted) throw new Error("Scan cancelled.");
+          const slice = batches.slice(b, b + 3);
+          const results = await Promise.all(slice.map((batch) => RobloxAPI.batchThumbnails(batch)));
+          for (const resArr of results) {
+            for (const thumb of resArr) {
+              if (thumb.imageUrl && thumb.imageUrl === targetAvatarUrl) {
+                const matchedJobId = String(thumb.requestId || "").split(":")[0];
+                const matchedServer = serverById[matchedJobId] || { id: matchedJobId };
+                this.activeAbort = null;
+                return {
+                  found: true,
+                  source: "scanner",
+                  user,
+                  avatarUrl: targetAvatarUrl,
+                  server: matchedServer,
+                  serversChecked,
+                  playersChecked,
+                };
+              }
+            }
+          }
+        }
+
+        cursor = pageRes.nextPageCursor || "";
+        if (!cursor) break;
+      }
+
+      this.activeAbort = null;
+      return {
+        found: false,
+        user,
+        avatarUrl: targetAvatarUrl,
+        server: null,
+        serversChecked,
+        playersChecked,
+      };
+    },
+
+    async browseServers(placeId, opts = {}) {
+      if (!placeId || !/^\d+$/.test(String(placeId))) {
+        throw new Error("Enter a valid Place ID first.");
+      }
+      const sortBy = opts.sortBy || "smallest";
+      const maxPlayersFilter = Number(opts.maxPlayers) || 0;
+      const minFpsFilter = Number(opts.minFps) || 0;
+      const pages = Math.min(3, Math.max(1, Number(opts.pages) || 2));
+      const apiOrder = sortBy === "smallest" ? "Asc" : "Desc";
+
+      let cursor = "";
+      const seen = new Set();
+      const collected = [];
+
+      for (let p = 0; p < pages; p++) {
+        const res = await RobloxAPI.getPublicServersPage(placeId, apiOrder, 100, cursor);
+        for (const srv of res.data) {
+          if (!srv.id || seen.has(srv.id)) continue;
+          seen.add(srv.id);
+          if (opts.excludeFull !== false && srv.playing >= srv.maxPlayers) continue;
+          if (maxPlayersFilter > 0 && srv.playing > maxPlayersFilter) continue;
+          if (minFpsFilter > 0 && typeof srv.fps === "number" && srv.fps < minFpsFilter) continue;
+          collected.push(srv);
+        }
+        cursor = res.nextPageCursor || "";
+        if (!cursor) break;
+      }
+
+      collected.sort((a, b) => {
+        if (sortBy === "ping") return (a.ping || 9999) - (b.ping || 9999);
+        if (sortBy === "fps") return (b.fps || 0) - (a.fps || 0);
+        if (sortBy === "largest") return (b.playing || 0) - (a.playing || 0);
+        return (a.playing || 0) - (b.playing || 0);
+      });
+
+      return collected.slice(0, 60);
+    },
+  };
+
+  const ExplorerEngine = {
+    experienceCache: {},
+    userCache: {},
+
+    async inspectExperience(placeId, force = false) {
+      const pId = String(placeId || "").trim();
+      if (!/^\d+$/.test(pId)) throw new Error("Enter a valid numeric Place ID.");
+      if (!force && this.experienceCache[pId] && Date.now() - this.experienceCache[pId].fetchedAt < 60000) {
+        return this.experienceCache[pId];
+      }
+
+      const universeId = await RobloxAPI.getUniverseId(pId);
+      if (!universeId) throw new Error(`Could not resolve Universe ID for Place ${pId}.`);
+
+      const [metaMap, votesMap, places, passes, badges] = await Promise.all([
+        RobloxAPI.getGameMeta([universeId]),
+        RobloxAPI.getGameVotes([universeId]),
+        RobloxAPI.getUniversePlaces(universeId).catch(() => []),
+        RobloxAPI.getGamePasses(universeId).catch(() => []),
+        RobloxAPI.getUniverseBadges(universeId).catch(() => []),
+      ]);
+
+      const meta = metaMap[universeId] || {};
+      const votes = votesMap[universeId] || { upVotes: 0, downVotes: 0 };
+      const totalVotes = (votes.upVotes || 0) + (votes.downVotes || 0);
+      const likeRatio = totalVotes > 0 ? ((votes.upVotes / totalVotes) * 100).toFixed(1) : null;
+      const totalPassRobux = passes.reduce((sum, gp) => sum + (Number(gp.price) || 0), 0);
+
+      const sortedPlaces = [...places].sort((a, b) => {
+        if (String(a.id) === String(meta.rootPlaceId)) return -1;
+        if (String(b.id) === String(meta.rootPlaceId)) return 1;
+        return 0;
+      });
+
+      const result = {
+        placeId: pId,
+        universeId,
+        meta,
+        upVotes: votes.upVotes || 0,
+        downVotes: votes.downVotes || 0,
+        likeRatio,
+        places: sortedPlaces,
+        passes,
+        totalPassRobux,
+        badges,
+        fetchedAt: Date.now(),
+      };
+      this.experienceCache[pId] = result;
+      return result;
+    },
+
+    async inspectUser(query, force = false) {
+      const q = String(query || "").trim().replace(/^@/, "");
+      if (!q) throw new Error("Enter a Username or User ID.");
+
+      let userId = q;
+      if (!/^\d+$/.test(q)) {
+        const resolved = await RobloxAPI.resolveUsername(q);
+        if (!resolved?.id) throw new Error(`No Roblox account found matching "${q}".`);
+        userId = String(resolved.id);
+      }
+
+      if (!force && this.userCache[userId] && Date.now() - this.userCache[userId].fetchedAt < 60000) {
+        return this.userCache[userId];
+      }
+
+      const profile = await RobloxAPI.getUserProfile(userId);
+      if (!profile) throw new Error(`User ID ${userId} does not exist.`);
+
+      const [avatars, presences, social, pastNames, collectibles, wearingIds] = await Promise.all([
+        RobloxAPI.getAvatars([userId]).catch(() => ({})),
+        RobloxAPI.getPresences([userId]).catch(() => []),
+        RobloxAPI.getUserSocialCounts(userId),
+        RobloxAPI.getUsernameHistory(userId).catch(() => []),
+        RobloxAPI.getUserCollectibles(userId).catch(() => ({ privateInventory: false, items: [], totalRap: 0 })),
+        RobloxAPI.getCurrentlyWearing(userId).catch(() => []),
+      ]);
+
+      const createdMs = profile.created ? new Date(profile.created).getTime() : 0;
+      const accountAgeDays = createdMs ? Math.max(0, Math.floor((Date.now() - createdMs) / 86400000)) : 0;
+
+      const result = {
+        userId: String(profile.id),
+        profile,
+        avatarUrl: avatars[profile.id] || "",
+        presence: presences[0] || null,
+        social,
+        pastNames,
+        collectibles,
+        wearingIds,
+        accountAgeDays,
+        fetchedAt: Date.now(),
+      };
+      this.userCache[userId] = result;
+      return result;
+    },
+  };
+
+  const SiteQoL = {
+    STYLE_ID: "rtk-qol-global-styles",
+
+    ensureStyles() {
+      if (document.getElementById(this.STYLE_ID)) return;
+      const st = document.createElement("style");
+      st.id = this.STYLE_ID;
+      st.textContent = `
+        html.rtk-qol-adblock .abp,
+        html.rtk-qol-adblock .abp-container,
+        html.rtk-qol-adblock #AdvertisingLeaderboard,
+        html.rtk-qol-adblock #Skyscraper-Abp-Left,
+        html.rtk-qol-adblock #Skyscraper-Abp-Right,
+        html.rtk-qol-adblock .ads-container,
+        html.rtk-qol-adblock .ad-annotations,
+        html.rtk-qol-adblock iframe[src*="user-sponsorship"] {
+          display: none !important;
+        }
+        html.rtk-qol-nobanners #desktop-app-banner,
+        html.rtk-qol-nobanners #upgrade-account-banner,
+        html.rtk-qol-nobanners [class*="app-upsell"],
+        html.rtk-qol-nobanners .upsell-banner-container {
+          display: none !important;
+        }
+        @media (min-width: 1360px) {
+          html.rtk-qol-wide .content,
+          html.rtk-qol-wide .container-main .content {
+            max-width: 1480px !important;
+          }
+        }
+        [data-rtk-fiat]::after {
+          content: attr(data-rtk-fiat);
+          font-size: 0.82em;
+          font-weight: 500;
+          opacity: 0.72;
+          margin-left: 4px;
+        }
+      `;
+      (document.head || document.documentElement).appendChild(st);
+    },
+
+    formatFiat(robuxAmount, modeKey) {
+      const mode = CURRENCY_MODES[modeKey || Store.getSettings().currencyMode];
+      if (!mode || !mode.rate) return "";
+      const num = Number(robuxAmount);
+      if (!Number.isFinite(num) || num <= 0) return "";
+      const val = num * mode.rate;
+      if (val < 0.01) return ` (<${mode.symbol}0.01${mode.suffix})`;
+      if (val >= 1000) return ` (${mode.symbol}${val.toLocaleString(undefined, { maximumFractionDigits: 0 })}${mode.suffix})`;
+      return ` (${mode.symbol}${val.toFixed(2)}${mode.suffix})`;
+    },
+
+    applySettings() {
+      this.ensureStyles();
+      const s = Store.getSettings();
+      const root = document.documentElement;
+      root.classList.toggle("rtk-qol-adblock", Boolean(s.qolBlockAds));
+      root.classList.toggle("rtk-qol-nobanners", Boolean(s.qolHideAppBanners));
+      root.classList.toggle("rtk-qol-wide", Boolean(s.qolWideLayout));
+
+      if (!s.currencyMode || s.currencyMode === "OFF") {
+        document.querySelectorAll("[data-rtk-fiat]").forEach((el) => el.removeAttribute("data-rtk-fiat"));
+      } else {
+        this.annotateRobuxPricesOnPage();
+      }
+    },
+
+    annotateRobuxPricesOnPage() {
+      const modeKey = Store.getSettings().currencyMode;
+      if (!modeKey || modeKey === "OFF" || !CURRENCY_MODES[modeKey]?.rate) return;
+
+      const nodes = document.querySelectorAll(
+        ".text-robux, .text-robux-lg, .text-robux-tile, #nav-robux-amount"
+      );
+      nodes.forEach((el) => {
+        const raw = (el.textContent || "").trim();
+        if (!raw || !/\d/.test(raw)) {
+          if (el.hasAttribute("data-rtk-fiat")) el.removeAttribute("data-rtk-fiat");
+          return;
+        }
+        let amount = 0;
+        const compactMatch = raw.replace(/,/g, "").match(/^(\d+(?:\.\d+)?)\s*([KMB])\+?$/i);
+        if (compactMatch) {
+          const base = parseFloat(compactMatch[1]);
+          const mult = compactMatch[2].toUpperCase() === "B" ? 1e9 : compactMatch[2].toUpperCase() === "M" ? 1e6 : 1e3;
+          amount = base * mult;
+        } else {
+          const digits = raw.replace(/[^0-9]/g, "");
+          amount = digits ? Number(digits) : 0;
+        }
+        const tag = this.formatFiat(amount, modeKey);
+        if (tag && el.getAttribute("data-rtk-fiat") !== tag) {
+          el.setAttribute("data-rtk-fiat", tag);
+        }
+      });
+    },
+
+    calcTaxAndDevEx(rawAmount) {
+      const n = Math.max(0, Math.floor(Number(rawAmount) || 0));
+      const afterTax = Math.floor(n * 0.7);
+      const taxTaken = n - afterTax;
+      const grossNeeded = n > 0 ? Math.ceil(n / 0.7) : 0;
+      return {
+        input: n,
+        afterTax,
+        taxTaken,
+        grossNeeded,
+        devExUsd: (n * 0.0038).toFixed(2),
+        afterTaxDevExUsd: (afterTax * 0.0038).toFixed(2),
+        purchaseUsd: (n * 0.0125).toFixed(2),
+      };
+    },
+  };
+
+  /* ============================================================================
    * 10. ROBLOX FOUNDATION DESIGN SYSTEM, SVG ICONS & SHADOW-DOM HUB UI
    * ============================================================================ */
   const Icons = {
@@ -1853,6 +2483,13 @@
     download: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
     plus: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
     tag: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>`,
+    search: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
+    compass: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>`,
+    pin: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 1 1 0 0 0 1-1V4a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1 1 1 0 0 1 1 1z"/></svg>`,
+    shuffle: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>`,
+    dollar: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`,
+    thumbsUp: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>`,
+    layers: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
     close: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
   };
 
@@ -1933,7 +2570,7 @@
       position: fixed;
       top: 0;
       right: 0;
-      width: 480px;
+      width: 520px;
       max-width: 96vw;
       height: 100vh;
       background: var(--rbx-bg-canvas);
@@ -1984,6 +2621,11 @@
       color: #00B06F;
       border-color: rgba(0, 176, 111, 0.35);
     }
+    .rtk-badge-danger {
+      background: rgba(247, 75, 82, 0.16);
+      color: #F74B52;
+      border-color: rgba(247, 75, 82, 0.35);
+    }
     .rtk-icon-btn {
       background: transparent;
       border: none;
@@ -2005,7 +2647,7 @@
     /* Roblox Native Underline Navigation Tabs */
     .rtk-tabs {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       background: var(--rbx-bg-surface);
       border-bottom: 1px solid var(--rbx-border);
       flex-shrink: 0;
@@ -2016,15 +2658,15 @@
       border-bottom: 2px solid transparent;
       color: var(--rbx-text-secondary);
       height: 42px;
-      padding: 0 4px;
-      font-size: 13px;
+      padding: 0 3px;
+      font-size: 12px;
       font-weight: 600;
       font-family: inherit;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 5px;
+      gap: 4px;
       white-space: nowrap;
       transition: color 0.12s, background 0.12s, border-color 0.12s;
     }
@@ -2077,6 +2719,45 @@
     .rtk-row { display: flex; gap: 8px; align-items: center; }
     .rtk-col { display: flex; flex-direction: column; gap: 8px; }
     .rtk-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .rtk-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .rtk-stat-box {
+      background: var(--rbx-bg-elevated);
+      border-radius: 8px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .rtk-stat-val {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--rbx-text);
+    }
+    .rtk-seg-bar {
+      display: flex;
+      background: var(--rbx-bg-elevated);
+      padding: 3px;
+      border-radius: 8px;
+      gap: 4px;
+    }
+    .rtk-seg-btn {
+      flex: 1;
+      height: 30px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--rbx-text-secondary);
+      font-size: 12.5px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.12s, color 0.12s;
+    }
+    .rtk-seg-btn.active {
+      background: var(--rbx-bg-surface);
+      color: var(--rbx-text);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    }
 
     /* Roblox Native Inputs & Selects */
     .rtk-input, .rtk-select, .rtk-textarea {
@@ -2396,6 +3077,11 @@
     playtimeSort: "time",
     playtimeSearch: "",
     accSearch: "",
+    exploreMode: "experience",
+    explorePlaceQuery: "",
+    exploreUserQuery: "",
+    exploreExpSubtab: "places",
+    pendingDevAssetId: "",
     liveTickInterval: null,
 
     isPageLightTheme() {
@@ -2439,6 +3125,7 @@
           <nav class="rtk-tabs" id="rtk-tabs">
             <button class="rtk-tab active" data-tab="joiner">${Icons.server}<span>Servers</span></button>
             <button class="rtk-tab" data-tab="accounts">${Icons.users}<span>Accounts</span></button>
+            <button class="rtk-tab" data-tab="explore">${Icons.compass}<span>Explore</span></button>
             <button class="rtk-tab" data-tab="settings">${Icons.toolkit}<span>Settings</span></button>
             <button class="rtk-tab" data-tab="playtime">${Icons.clock}<span>Playtime</span></button>
             <button class="rtk-tab" data-tab="devtools">${Icons.code}<span>Dev</span></button>
@@ -2456,7 +3143,6 @@
       document.documentElement.appendChild(this.host);
       this.syncTheme();
 
-      // Watch body class changes to sync Roblox Dark/Light theme automatically
       if (document.body) {
         new MutationObserver(() => this.syncTheme()).observe(document.body, {
           attributes: true,
@@ -2531,6 +3217,19 @@
       this.toggle(true);
     },
 
+    openExplore({ mode = "experience", query = "", subtab = "" } = {}) {
+      this.exploreMode = mode;
+      if (mode === "experience" && query) this.explorePlaceQuery = String(query);
+      if (mode === "user" && query) this.exploreUserQuery = String(query);
+      if (subtab) this.exploreExpSubtab = subtab;
+      this.openTab("explore");
+    },
+
+    openDevAsset(assetId) {
+      this.pendingDevAssetId = String(assetId || "");
+      this.openTab("devtools");
+    },
+
     switchTab(tabName) {
       this.activeTab = tabName;
       this.updateTabButtons();
@@ -2578,15 +3277,17 @@
       if (!body) return;
       if (this.activeTab === "joiner") this.renderJoinerTab(body);
       else if (this.activeTab === "accounts") this.renderAccountsTab(body);
+      else if (this.activeTab === "explore") this.renderExploreTab(body);
       else if (this.activeTab === "settings") this.renderSettingsTab(body);
       else if (this.activeTab === "playtime") this.renderPlaytimeTab(body);
       else if (this.activeTab === "devtools") this.renderDevToolsTab(body);
     },
 
-    /* ---------------- TAB 1: JOINER & SERVERS ---------------- */
+    /* ---------------- TAB 1: JOINER, PLAYER FINDER & SERVER BROWSER ---------------- */
     renderJoinerTab(body) {
       const pagePlaceId = Utils.getPlaceIdFromPage() || "";
       const recent = Store.get(STORAGE_KEYS.RECENT_SERVERS, []);
+      const pinned = PinnedServers.getAll();
       const activeSession = PlaytimeTracker.getData().activeSession;
 
       body.innerHTML = `
@@ -2601,7 +3302,10 @@
           </div>
           <div class="rtk-col">
             <label class="rtk-label">Server Job ID <span class="rtk-muted" style="font-weight:400;">(Optional)</span></label>
-            <input class="rtk-input" id="j-job" placeholder="9134c999-91d5-4b52-9f0a-f7cbae67fe77" />
+            <div class="rtk-row">
+              <input class="rtk-input rtk-flex-1" id="j-job" placeholder="9134c999-91d5-4b52-9f0a-f7cbae67fe77" />
+              <button class="rtk-btn" id="j-pin-input-btn" title="Pin this Job ID">${Icons.pin}<span>Pin</span></button>
+            </div>
           </div>
           <div class="rtk-col">
             <label class="rtk-label">Account</label>
@@ -2610,9 +3314,10 @@
           <button class="rtk-btn rtk-btn-growth" id="j-launch-btn" style="height:40px;font-size:14px;margin-top:4px;">
             ${Icons.play}<span>Join Experience</span>
           </button>
-          <div class="rtk-grid-2">
-            <button class="rtk-btn" id="j-smallest-btn">Smallest Server</button>
-            <button class="rtk-btn" id="j-ping-btn">Lowest Ping</button>
+          <div class="rtk-grid-3">
+            <button class="rtk-btn rtk-btn-sm" id="j-hop-btn">${Icons.shuffle}<span>Server Hop</span></button>
+            <button class="rtk-btn rtk-btn-sm" id="j-smallest-btn">Smallest</button>
+            <button class="rtk-btn rtk-btn-sm" id="j-ping-btn">Lowest Ping</button>
           </div>
         </div>
 
@@ -2620,6 +3325,7 @@
           <div class="rtk-card rtk-col">
             <div class="rtk-card-title">
               <span class="rtk-row"><span class="rtk-dot-live"></span> Active Server</span>
+              <button class="rtk-btn rtk-btn-sm" id="j-pin-live-btn">${Icons.pin}<span>Pin</span></button>
             </div>
             <div class="rtk-muted">${Utils.escapeHtml(activeSession.name || "In-Experience")}</div>
             <div class="rtk-code">${Utils.escapeHtml(activeSession.gameId)}</div>
@@ -2629,6 +3335,64 @@
             </div>
           </div>
         ` : ""}
+
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
+            <span>Find Player in Server</span>
+            <span class="rtk-badge">Token Scanner</span>
+          </div>
+          <div class="rtk-muted">Locate which public server any Roblox user is playing in — works even when their joins are turned off.</div>
+          <div class="rtk-row">
+            <input class="rtk-input rtk-flex-1" id="j-find-user" placeholder="Username or User ID (e.g. Builderman)" />
+            <button class="rtk-btn rtk-btn-cta" id="j-find-btn">${Icons.search}<span>Find</span></button>
+            <button class="rtk-btn rtk-btn-danger" id="j-find-stop" style="display:none;">Stop</button>
+          </div>
+          <div id="j-find-output"></div>
+        </div>
+
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
+            <span>Custom Server Browser</span>
+          </div>
+          <div class="rtk-grid-2">
+            <select class="rtk-select" id="j-browse-sort">
+              <option value="smallest">Smallest Players</option>
+              <option value="ping">Lowest Ping (ms)</option>
+              <option value="fps">Highest Server FPS</option>
+              <option value="largest">Most Populated</option>
+            </select>
+            <select class="rtk-select" id="j-browse-max">
+              <option value="0">Max Players: Any</option>
+              <option value="2">Max 2 Players (Solo/Duo)</option>
+              <option value="5">Max 5 Players</option>
+              <option value="10">Max 10 Players</option>
+            </select>
+          </div>
+          <button class="rtk-btn" id="j-browse-btn">${Icons.refresh}<span>Fetch Filtered Servers</span></button>
+          <div id="j-browse-output" class="rtk-col"></div>
+        </div>
+
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
+            <span>Pinned Servers (${pinned.length})</span>
+          </div>
+          ${pinned.length === 0
+            ? `<div class="rtk-muted">Bookmark VIP/grinding or favorite public Job IDs here for instant re-entry.</div>`
+            : pinned.map((p) => `
+              <div class="rtk-acc-item">
+                <div class="rtk-flex-1">
+                  <div class="rtk-row" style="gap:6px;">
+                    <strong class="rtk-ellipsis">${Utils.escapeHtml(p.label || p.gameName || `Place ${p.placeId}`)}</strong>
+                    ${p.label && p.gameName ? `<span class="rtk-badge">${Utils.escapeHtml(p.gameName)}</span>` : ""}
+                  </div>
+                  <div class="rtk-muted rtk-ellipsis">${Utils.escapeHtml(p.jobId.slice(0, 18))}... · Place ${Utils.escapeHtml(p.placeId)}</div>
+                </div>
+                <button class="rtk-btn rtk-btn-sm" data-copy-job="${Utils.escapeHtml(p.jobId)}">Copy</button>
+                <button class="rtk-btn rtk-btn-sm rtk-btn-danger" data-unpin-job="${Utils.escapeHtml(p.jobId)}" title="Unpin">✕</button>
+                <button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-rejoin-place="${Utils.escapeHtml(p.placeId)}" data-rejoin-job="${Utils.escapeHtml(p.jobId)}">Join</button>
+              </div>
+            `).join("")}
+        </div>
 
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
@@ -2643,6 +3407,7 @@
                   <div style="font-weight:600;" class="rtk-ellipsis">${Utils.escapeHtml(item.gameName || `Place ${item.placeId}`)}</div>
                   <div class="rtk-muted rtk-ellipsis">${Utils.escapeHtml(item.jobId.slice(0, 18))}... · @${Utils.escapeHtml(item.accountName)} · ${Utils.timeAgo(item.joinedAt)}</div>
                 </div>
+                <button class="rtk-btn rtk-btn-sm" title="Pin Server" data-pin-recent-place="${Utils.escapeHtml(item.placeId)}" data-pin-recent-job="${Utils.escapeHtml(item.jobId)}" data-pin-recent-name="${Utils.escapeHtml(item.gameName || "")}">${Icons.pin}</button>
                 <button class="rtk-btn rtk-btn-sm" data-copy-job="${Utils.escapeHtml(item.jobId)}">Copy</button>
                 <button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-rejoin-place="${Utils.escapeHtml(item.placeId)}" data-rejoin-job="${Utils.escapeHtml(item.jobId)}">Join</button>
               </div>
@@ -2663,6 +3428,33 @@
           this.toast("Launching Roblox...", "success");
         } catch (err) {
           this.toast(err.message, "error");
+        }
+      });
+
+      body.querySelector("#j-pin-input-btn").addEventListener("click", async () => {
+        const { placeId, jobId } = getInputs();
+        if (!jobId) return this.toast("Paste a Job ID first to pin it.", "error");
+        const label = window.prompt("Optional label for this pinned server (e.g. Grinding, Trading):", "") ?? "";
+        try {
+          await PinnedServers.pin({ jobId, placeId, label });
+          this.toast("Server pinned.", "success");
+          this.renderJoinerTab(body);
+        } catch (err) {
+          this.toast(err.message, "error");
+        }
+      });
+
+      body.querySelector("#j-hop-btn").addEventListener("click", async (e) => {
+        const { placeId, accId } = getInputs();
+        if (!placeId) return this.toast("Enter a Place ID first.", "error");
+        e.currentTarget.disabled = true;
+        try {
+          const s = await Launcher.serverHop(placeId, accId);
+          this.toast(`Hopping to fresh server (${s.playing}/${s.maxPlayers})...`, "success");
+        } catch (err) {
+          this.toast(err.message, "error");
+        } finally {
+          e.currentTarget.disabled = false;
         }
       });
 
@@ -2694,6 +3486,18 @@
         }
       });
 
+      body.querySelector("#j-pin-live-btn")?.addEventListener("click", async () => {
+        const pId = activeSession.placeId || activeSession.rootPlaceId || pagePlaceId;
+        const label = window.prompt("Optional label for this active server:", "") ?? "";
+        try {
+          await PinnedServers.pin({ jobId: activeSession.gameId, placeId: pId, label, gameName: activeSession.name });
+          this.toast("Active server pinned.", "success");
+          this.renderJoinerTab(body);
+        } catch (err) {
+          this.toast(err.message, "error");
+        }
+      });
+
       body.querySelector("#j-copy-live-job")?.addEventListener("click", async () => {
         await Utils.copyText(activeSession.gameId);
         this.toast("Copied active Job ID.", "success");
@@ -2706,9 +3510,160 @@
         this.toast("Copied shareable join link.", "success");
       });
 
+      // Player Server Finder
+      const findBtn = body.querySelector("#j-find-btn");
+      const stopBtn = body.querySelector("#j-find-stop");
+      const findInput = body.querySelector("#j-find-user");
+      const findOut = body.querySelector("#j-find-output");
+
+      const runPlayerScan = async () => {
+        const { placeId } = getInputs();
+        const query = findInput.value.trim();
+        if (!placeId) return this.toast("Enter a Place ID above first.", "error");
+        if (!query) return this.toast("Enter a username or User ID to find.", "error");
+
+        findBtn.style.display = "none";
+        stopBtn.style.display = "inline-flex";
+        findOut.innerHTML = `<div class="rtk-muted" style="margin-top:4px;">Resolving user & avatar headshot...</div>`;
+
+        try {
+          const res = await ServerScanner.findPlayerInServers(placeId, query, (prog) => {
+            findOut.innerHTML = `<div class="rtk-muted" style="margin-top:4px;">Scanning @${Utils.escapeHtml(prog.username)} — Page ${prog.page}/15 · ${Utils.formatNumber(prog.serversChecked)} servers · ${Utils.formatNumber(prog.playersChecked)} players...</div>`;
+          });
+
+          if (res.found && res.server) {
+            const srv = res.server;
+            findOut.innerHTML = `
+              <div class="rtk-acc-item current" style="margin-top:6px;">
+                <img class="rtk-avatar" src="${Utils.escapeHtml(res.avatarUrl)}" alt="" />
+                <div class="rtk-flex-1">
+                  <div style="font-weight:700;">Found @${Utils.escapeHtml(res.user.name)}</div>
+                  <div class="rtk-muted">${Utils.escapeHtml(srv.id.slice(0, 16))}... · ${srv.playing}/${srv.maxPlayers} players${srv.ping ? ` · ${srv.ping} ms` : ""}</div>
+                </div>
+                <button class="rtk-btn rtk-btn-sm" id="j-found-copy">${Icons.copy}</button>
+                <button class="rtk-btn rtk-btn-sm rtk-btn-growth" id="j-found-join">${Icons.play}<span>Join</span></button>
+              </div>
+            `;
+            findOut.querySelector("#j-found-copy")?.addEventListener("click", async () => {
+              await Utils.copyText(srv.id);
+              this.toast("Copied found server Job ID.", "success");
+            });
+            findOut.querySelector("#j-found-join")?.addEventListener("click", async () => {
+              const accId = body.querySelector("#j-account").value;
+              try {
+                await Launcher.join(placeId, srv.id, accId);
+                this.toast(`Joining @${res.user.name}'s server...`, "success");
+              } catch (err) {
+                this.toast(err.message, "error");
+              }
+            });
+          } else {
+            findOut.innerHTML = `<div class="rtk-muted" style="margin-top:6px;">@${Utils.escapeHtml(res.user.name)} was not found in the first ${Utils.formatNumber(res.serversChecked)} public servers (${Utils.formatNumber(res.playersChecked)} players checked). They may be offline, in a private server, or in a different subplace.</div>`;
+          }
+        } catch (err) {
+          findOut.innerHTML = `<div class="rtk-alert" style="margin-top:6px;">${Utils.escapeHtml(err.message)}</div>`;
+        } finally {
+          findBtn.style.display = "inline-flex";
+          stopBtn.style.display = "none";
+        }
+      };
+
+      findBtn.addEventListener("click", runPlayerScan);
+      findInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          runPlayerScan();
+        }
+      });
+      stopBtn.addEventListener("click", () => ServerScanner.abort());
+
+      // Custom Server Browser
+      body.querySelector("#j-browse-btn").addEventListener("click", async (e) => {
+        const { placeId } = getInputs();
+        if (!placeId) return this.toast("Enter a Place ID above first.", "error");
+        const sortBy = body.querySelector("#j-browse-sort").value;
+        const maxPlayers = Number(body.querySelector("#j-browse-max").value) || 0;
+        const out = body.querySelector("#j-browse-output");
+
+        e.currentTarget.disabled = true;
+        out.innerHTML = `<div class="rtk-muted">Fetching public servers...</div>`;
+        try {
+          const list = await ServerScanner.browseServers(placeId, { sortBy, maxPlayers, pages: 2 });
+          if (!list.length) {
+            out.innerHTML = `<div class="rtk-muted">No open public servers matched your filter.</div>`;
+            return;
+          }
+          out.innerHTML = list.slice(0, 25).map((srv) => `
+            <div class="rtk-acc-item">
+              <div class="rtk-flex-1">
+                <div style="font-weight:700;">${srv.playing}/${srv.maxPlayers} Players ${srv.ping ? `· ${srv.ping} ms` : ""} ${srv.fps ? `· ${Math.round(srv.fps)} FPS` : ""}</div>
+                <div class="rtk-muted rtk-ellipsis">${Utils.escapeHtml(srv.id)}</div>
+              </div>
+              <button class="rtk-btn rtk-btn-sm" data-br-pin="${Utils.escapeHtml(srv.id)}" title="Pin">${Icons.pin}</button>
+              <button class="rtk-btn rtk-btn-sm" data-br-copy="${Utils.escapeHtml(srv.id)}" title="Copy">${Icons.copy}</button>
+              <button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-br-join="${Utils.escapeHtml(srv.id)}">Join</button>
+            </div>
+          `).join("");
+
+          out.querySelectorAll("[data-br-copy]").forEach((b) => {
+            b.addEventListener("click", async () => {
+              await Utils.copyText(b.dataset.brCopy);
+              this.toast("Copied Job ID.", "success");
+            });
+          });
+          out.querySelectorAll("[data-br-pin]").forEach((b) => {
+            b.addEventListener("click", async () => {
+              const label = window.prompt("Optional label for pinned server:", "") ?? "";
+              await PinnedServers.pin({ jobId: b.dataset.brPin, placeId, label });
+              this.toast("Server pinned.", "success");
+            });
+          });
+          out.querySelectorAll("[data-br-join]").forEach((b) => {
+            b.addEventListener("click", async () => {
+              const accId = body.querySelector("#j-account").value;
+              try {
+                await Launcher.join(placeId, b.dataset.brJoin, accId);
+                this.toast("Joining selected server...", "success");
+              } catch (err) {
+                this.toast(err.message, "error");
+              }
+            });
+          });
+        } catch (err) {
+          out.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
+        } finally {
+          e.currentTarget.disabled = false;
+        }
+      });
+
       body.querySelector("#j-clear-recent")?.addEventListener("click", () => {
         Store.set(STORAGE_KEYS.RECENT_SERVERS, []);
         this.renderJoinerTab(body);
+      });
+
+      body.querySelectorAll("[data-unpin-job]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          PinnedServers.unpin(btn.dataset.unpinJob);
+          this.renderJoinerTab(body);
+        });
+      });
+
+      body.querySelectorAll("[data-pin-recent-job]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const label = window.prompt("Optional label for pinned server:", "") ?? "";
+          try {
+            await PinnedServers.pin({
+              jobId: btn.dataset.pinRecentJob,
+              placeId: btn.dataset.pinRecentPlace,
+              gameName: btn.dataset.pinRecentName,
+              label,
+            });
+            this.toast("Pinned server.", "success");
+            this.renderJoinerTab(body);
+          } catch (err) {
+            this.toast(err.message, "error");
+          }
+        });
       });
 
       body.querySelectorAll("[data-copy-job]").forEach((btn) => {
@@ -2729,6 +3684,365 @@
           }
         });
       });
+    },
+
+    /* ---------------- TAB 3: EXPLORER (SUBPLACES, PASSES, BADGES & USER/RAP/BANNED LOOKUP) ---------------- */
+    async renderExploreTab(body) {
+      const ctx = DevTools.detectUrlContext();
+      if (!this.explorePlaceQuery) {
+        this.explorePlaceQuery = Utils.getPlaceIdFromPage() || PlaytimeTracker.getData().activeSession?.placeId || "";
+      }
+      if (!this.exploreUserQuery && ctx.type === "user" && ctx.id) {
+        this.exploreUserQuery = String(ctx.id);
+      }
+
+      body.innerHTML = `
+        <div class="rtk-seg-bar">
+          <button class="rtk-seg-btn ${this.exploreMode === "experience" ? "active" : ""}" data-exp-mode="experience">Experience & Subplaces</button>
+          <button class="rtk-seg-btn ${this.exploreMode === "user" ? "active" : ""}" data-exp-mode="user">User, RAP & Banned Lookup</button>
+        </div>
+        <div id="exp-content" class="rtk-col"></div>
+      `;
+
+      body.querySelectorAll("[data-exp-mode]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          this.exploreMode = btn.dataset.expMode;
+          this.renderExploreTab(body);
+        });
+      });
+
+      const content = body.querySelector("#exp-content");
+      if (this.exploreMode === "experience") {
+        await this.renderExploreExperience(content);
+      } else {
+        await this.renderExploreUser(content);
+      }
+    },
+
+    async renderExploreExperience(container) {
+      container.innerHTML = `
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title"><span>Inspect Experience & Universe</span></div>
+          <div class="rtk-row">
+            <input class="rtk-input rtk-flex-1" id="exp-place-input" placeholder="Place ID (e.g. 920587237)" value="${Utils.escapeHtml(this.explorePlaceQuery)}" />
+            <button class="rtk-btn rtk-btn-cta" id="exp-place-go">${Icons.search}<span>Inspect</span></button>
+          </div>
+        </div>
+        <div id="exp-place-result" class="rtk-col"></div>
+      `;
+
+      const out = container.querySelector("#exp-place-result");
+      const inp = container.querySelector("#exp-place-input");
+
+      const loadExp = async (force = false) => {
+        const pId = inp.value.trim();
+        if (!pId) {
+          out.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Open any experience page or enter a Place ID above to inspect subplaces, hidden places, GamePasses, badges, and exact like ratios.</div></div>`;
+          return;
+        }
+        this.explorePlaceQuery = pId;
+        out.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Loading Universe metadata, subplaces, passes, and badges...</div></div>`;
+        try {
+          const data = await ExplorerEngine.inspectExperience(pId, force);
+          const m = data.meta;
+          out.innerHTML = `
+            <div class="rtk-card rtk-col">
+              <div class="rtk-row" style="align-items:flex-start;">
+                ${m.iconUrl ? `<img class="rtk-game-thumb" style="width:56px;height:56px;" src="${Utils.escapeHtml(m.iconUrl)}" alt="" />` : ""}
+                <div class="rtk-flex-1">
+                  <div style="font-weight:700;font-size:15px;">${Utils.escapeHtml(m.name || `Place ${pId}`)}</div>
+                  <div class="rtk-muted">By ${Utils.escapeHtml(m.creator?.name || "Unknown")} ${m.creator?.hasVerifiedBadge ? "✓" : ""} · Max ${Utils.escapeHtml(m.maxPlayers || "?")} players</div>
+                  <div class="rtk-row" style="margin-top:6px;flex-wrap:wrap;">
+                    <button class="rtk-btn rtk-btn-sm" data-exp-copy="${Utils.escapeHtml(data.universeId)}">${Icons.copy}<span>Universe ${Utils.escapeHtml(data.universeId)}</span></button>
+                    <button class="rtk-btn rtk-btn-sm" data-exp-copy="${Utils.escapeHtml(m.rootPlaceId || pId)}">${Icons.copy}<span>Root ${Utils.escapeHtml(m.rootPlaceId || pId)}</span></button>
+                  </div>
+                </div>
+              </div>
+              <div class="rtk-grid-2" style="margin-top:4px;">
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Like Ratio</span>
+                  <span class="rtk-stat-val">${data.likeRatio !== null ? `${data.likeRatio}%` : "—"} <span class="rtk-muted" style="font-weight:400;">(${Utils.formatCompact(data.upVotes)} / ${Utils.formatCompact(data.downVotes)})</span></span>
+                </div>
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Active Players</span>
+                  <span class="rtk-stat-val">${Utils.formatNumber(m.playing ?? 0)}</span>
+                </div>
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Total Visits</span>
+                  <span class="rtk-stat-val">${Utils.formatCompact(m.visits ?? 0)}</span>
+                </div>
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Updated</span>
+                  <span class="rtk-stat-val" style="font-size:13px;">${Utils.formatDateShort(m.updated)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="rtk-seg-bar">
+              <button class="rtk-seg-btn ${this.exploreExpSubtab === "places" ? "active" : ""}" data-sub="places">Subplaces (${data.places.length})</button>
+              <button class="rtk-seg-btn ${this.exploreExpSubtab === "passes" ? "active" : ""}" data-sub="passes">Passes (${data.passes.length})</button>
+              <button class="rtk-seg-btn ${this.exploreExpSubtab === "badges" ? "active" : ""}" data-sub="badges">Badges (${data.badges.length})</button>
+            </div>
+
+            <div class="rtk-card rtk-col" id="exp-sub-panel"></div>
+          `;
+
+          const renderSub = () => {
+            const subEl = out.querySelector("#exp-sub-panel");
+            if (!subEl) return;
+            if (this.exploreExpSubtab === "places") {
+              subEl.innerHTML = data.places.length === 0
+                ? `<div class="rtk-muted">No places returned by Universe API.</div>`
+                : data.places.map((pl) => {
+                    const isRoot = String(pl.id) === String(m.rootPlaceId);
+                    return `
+                      <div class="rtk-acc-item">
+                        <div class="rtk-flex-1">
+                          <div class="rtk-row" style="gap:6px;">
+                            <strong class="rtk-ellipsis">${Utils.escapeHtml(pl.name || `Place ${pl.id}`)}</strong>
+                            <span class="rtk-badge ${isRoot ? "rtk-badge-live" : ""}">${isRoot ? "ROOT" : "SUBPLACE"}</span>
+                          </div>
+                          <div class="rtk-muted">Place ID: ${Utils.escapeHtml(pl.id)}</div>
+                        </div>
+                        <button class="rtk-btn rtk-btn-sm" data-exp-copy="${Utils.escapeHtml(pl.id)}">${Icons.copy}</button>
+                        <a class="rtk-btn rtk-btn-sm" href="https://www.roblox.com/games/${encodeURIComponent(pl.id)}/-" target="_blank" rel="noopener" style="text-decoration:none;">Page</a>
+                        <button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-exp-join="${Utils.escapeHtml(pl.id)}">${Icons.play}<span>Join</span></button>
+                      </div>
+                    `;
+                  }).join("");
+            } else if (this.exploreExpSubtab === "passes") {
+              subEl.innerHTML = `
+                ${data.passes.length > 0 ? `<div class="rtk-muted">Total Storefront Value: <b>R$ ${Utils.formatNumber(data.totalPassRobux)}</b>${Utils.escapeHtml(SiteQoL.formatFiat(data.totalPassRobux))}</div>` : ""}
+                ${data.passes.length === 0
+                  ? `<div class="rtk-muted">No public GamePasses found for this experience.</div>`
+                  : data.passes.map((gp) => `
+                    <div class="rtk-acc-item">
+                      <div class="rtk-flex-1">
+                        <div style="font-weight:700;" class="rtk-ellipsis">${Utils.escapeHtml(gp.name)}</div>
+                        <div class="rtk-muted">${gp.price != null ? `R$ ${Utils.formatNumber(gp.price)}${Utils.escapeHtml(SiteQoL.formatFiat(gp.price))}` : "Off-sale"} · ID ${Utils.escapeHtml(gp.id)}</div>
+                      </div>
+                      <button class="rtk-btn rtk-btn-sm" data-exp-copy="${Utils.escapeHtml(gp.id)}">${Icons.copy}</button>
+                      <a class="rtk-btn rtk-btn-sm" href="https://www.roblox.com/game-pass/${encodeURIComponent(gp.id)}/-" target="_blank" rel="noopener" style="text-decoration:none;">Open</a>
+                    </div>
+                  `).join("")}
+              `;
+            } else {
+              subEl.innerHTML = data.badges.length === 0
+                ? `<div class="rtk-muted">No badges found for this experience.</div>`
+                : data.badges.map((bg) => {
+                    const rarity = ((bg.statistics?.winRatePercentage || 0) * 100).toFixed(1);
+                    return `
+                      <div class="rtk-acc-item">
+                        <div class="rtk-flex-1">
+                          <div style="font-weight:700;" class="rtk-ellipsis">${Utils.escapeHtml(bg.name)}</div>
+                          <div class="rtk-muted">${rarity}% rarity · ${Utils.formatCompact(bg.statistics?.awardedCount || 0)} won · ID ${Utils.escapeHtml(bg.id)}</div>
+                        </div>
+                        <button class="rtk-btn rtk-btn-sm" data-exp-copy="${Utils.escapeHtml(bg.id)}">${Icons.copy}</button>
+                      </div>
+                    `;
+                  }).join("");
+            }
+
+            subEl.querySelectorAll("[data-exp-copy]").forEach((b) => {
+              b.addEventListener("click", async () => {
+                await Utils.copyText(b.dataset.expCopy);
+                this.toast(`Copied ID: ${b.dataset.expCopy}`, "success");
+              });
+            });
+            subEl.querySelectorAll("[data-exp-join]").forEach((b) => {
+              b.addEventListener("click", async () => {
+                try {
+                  await Launcher.join(b.dataset.expJoin, null, "current");
+                  this.toast("Launching place...", "success");
+                } catch (err) {
+                  this.toast(err.message, "error");
+                }
+              });
+            });
+          };
+
+          renderSub();
+
+          out.querySelectorAll("[data-exp-copy]").forEach((b) => {
+            b.addEventListener("click", async () => {
+              await Utils.copyText(b.dataset.expCopy);
+              this.toast(`Copied: ${b.dataset.expCopy}`, "success");
+            });
+          });
+          out.querySelectorAll("[data-sub]").forEach((b) => {
+            b.addEventListener("click", () => {
+              this.exploreExpSubtab = b.dataset.sub;
+              out.querySelectorAll("[data-sub]").forEach((x) => x.classList.toggle("active", x.dataset.sub === this.exploreExpSubtab));
+              renderSub();
+            });
+          });
+        } catch (err) {
+          out.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
+        }
+      };
+
+      container.querySelector("#exp-place-go").addEventListener("click", () => loadExp(true));
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          loadExp(true);
+        }
+      });
+
+      if (this.explorePlaceQuery) {
+        loadExp(false);
+      } else {
+        loadExp(false);
+      }
+    },
+
+    async renderExploreUser(container) {
+      container.innerHTML = `
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title"><span>User, Collectible RAP & Terminated Lookup</span></div>
+          <div class="rtk-row">
+            <input class="rtk-input rtk-flex-1" id="exp-user-input" placeholder="Username or User ID (works on banned accounts)" value="${Utils.escapeHtml(this.exploreUserQuery)}" />
+            <button class="rtk-btn rtk-btn-cta" id="exp-user-go">${Icons.search}<span>Lookup</span></button>
+          </div>
+        </div>
+        <div id="exp-user-result" class="rtk-col"></div>
+      `;
+
+      const out = container.querySelector("#exp-user-result");
+      const inp = container.querySelector("#exp-user-input");
+
+      const loadUser = async (force = false) => {
+        const q = inp.value.trim();
+        if (!q) {
+          out.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Search any Roblox username or User ID to view join date, account age, past usernames, Limited RAP, worn asset IDs, and terminated/banned account profiles.</div></div>`;
+          return;
+        }
+        this.exploreUserQuery = q;
+        out.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Looking up user profile, RAP, history, and outfit...</div></div>`;
+        try {
+          const u = await ExplorerEngine.inspectUser(q, force);
+          const p = u.profile;
+          const presType = u.presence?.userPresenceType || 0;
+          const presLabel = presType === 2 ? `Playing ${u.presence.lastLocation || "In-Game"}` : presType === 3 ? "In Studio" : presType === 1 ? "Online" : "Offline";
+          const years = (u.accountAgeDays / 365.25).toFixed(1);
+
+          out.innerHTML = `
+            <div class="rtk-card rtk-col">
+              <div class="rtk-row" style="align-items:flex-start;">
+                <img class="rtk-avatar" style="width:54px;height:54px;" src="${Utils.escapeHtml(u.avatarUrl || "https://www.roblox.com/favicon.ico")}" alt="" />
+                <div class="rtk-flex-1">
+                  <div class="rtk-row" style="gap:6px;flex-wrap:wrap;">
+                    <strong style="font-size:15px;">${Utils.escapeHtml(p.displayName || p.name)}</strong>
+                    ${p.hasVerifiedBadge ? `<span class="rtk-badge rtk-badge-live">Verified</span>` : ""}
+                    ${p.isBanned ? `<span class="rtk-badge rtk-badge-danger">BANNED / TERMINATED</span>` : `<span class="rtk-badge ${presType === 2 ? "rtk-badge-live" : ""}">${Utils.escapeHtml(presLabel)}</span>`}
+                  </div>
+                  <div class="rtk-muted">@${Utils.escapeHtml(p.name)} · ID ${Utils.escapeHtml(p.id)}</div>
+                  <div class="rtk-row" style="margin-top:6px;flex-wrap:wrap;">
+                    <button class="rtk-btn rtk-btn-sm" id="exp-u-copy-id">${Icons.copy}<span>Copy ID</span></button>
+                    ${!p.isBanned ? `<a class="rtk-btn rtk-btn-sm" href="https://www.roblox.com/users/${encodeURIComponent(p.id)}/profile" target="_blank" rel="noopener" style="text-decoration:none;">Profile</a>` : ""}
+                    ${u.presence?.placeId && u.presence?.gameId ? `<button class="rtk-btn rtk-btn-sm rtk-btn-growth" id="exp-u-join">${Icons.play}<span>Join Server</span></button>` : ""}
+                  </div>
+                </div>
+              </div>
+
+              ${p.description ? `<div class="rtk-code" style="max-height:90px;white-space:pre-wrap;font-family:inherit;">${Utils.escapeHtml(p.description)}</div>` : ""}
+
+              <div class="rtk-grid-2">
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Created</span>
+                  <span class="rtk-stat-val" style="font-size:13px;">${Utils.formatDateShort(p.created)} <span class="rtk-muted" style="font-weight:400;">(${years}y)</span></span>
+                </div>
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Collectible RAP</span>
+                  <span class="rtk-stat-val" style="font-size:13px;">${u.collectibles.privateInventory ? "Private" : `R$ ${Utils.formatNumber(u.collectibles.totalRap)}${Utils.escapeHtml(SiteQoL.formatFiat(u.collectibles.totalRap))}`}</span>
+                </div>
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Social</span>
+                  <span class="rtk-stat-val" style="font-size:13px;">${Utils.formatCompact(u.social.friends ?? 0)} Fr · ${Utils.formatCompact(u.social.followers ?? 0)} Fol</span>
+                </div>
+                <div class="rtk-stat-box">
+                  <span class="rtk-muted">Wearing</span>
+                  <span class="rtk-stat-val" style="font-size:13px;">${u.wearingIds.length} Asset${u.wearingIds.length === 1 ? "" : "s"}</span>
+                </div>
+              </div>
+            </div>
+
+            ${u.pastNames.length > 0 ? `
+              <div class="rtk-card rtk-col">
+                <div class="rtk-card-title"><span>Past Usernames (${u.pastNames.length})</span></div>
+                <div class="rtk-row" style="flex-wrap:wrap;gap:6px;">
+                  ${u.pastNames.slice(0, 25).map((nm) => `<span class="rtk-badge">${Utils.escapeHtml(nm)}</span>`).join("")}
+                </div>
+              </div>
+            ` : ""}
+
+            ${!u.collectibles.privateInventory && u.collectibles.items.length > 0 ? `
+              <div class="rtk-card rtk-col">
+                <div class="rtk-card-title"><span>Limited Collectibles (${u.collectibles.items.length})</span></div>
+                ${u.collectibles.items.slice(0, 15).map((it) => `
+                  <div class="rtk-acc-item">
+                    <div class="rtk-flex-1">
+                      <div style="font-weight:700;" class="rtk-ellipsis">${Utils.escapeHtml(it.name)}</div>
+                      <div class="rtk-muted">RAP: R$ ${Utils.formatNumber(it.recentAveragePrice || 0)}${it.serialNumber ? ` · Serial #${it.serialNumber}` : ""}</div>
+                    </div>
+                    <a class="rtk-btn rtk-btn-sm" href="https://www.roblox.com/catalog/${encodeURIComponent(it.assetId)}/-" target="_blank" rel="noopener" style="text-decoration:none;">Item</a>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
+
+            ${u.wearingIds.length > 0 ? `
+              <div class="rtk-card rtk-col">
+                <div class="rtk-card-title"><span>Currently Wearing Assets (${u.wearingIds.length})</span></div>
+                ${u.wearingIds.map((aid) => `
+                  <div class="rtk-acc-item">
+                    <div class="rtk-flex-1">
+                      <strong>Asset ${Utils.escapeHtml(aid)}</strong>
+                    </div>
+                    <button class="rtk-btn rtk-btn-sm" data-wear-copy="${Utils.escapeHtml(aid)}">${Icons.copy}</button>
+                    <button class="rtk-btn rtk-btn-sm" data-wear-dev="${Utils.escapeHtml(aid)}">Extract</button>
+                    <a class="rtk-btn rtk-btn-sm" href="https://www.roblox.com/catalog/${encodeURIComponent(aid)}/-" target="_blank" rel="noopener" style="text-decoration:none;">Catalog</a>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
+          `;
+
+          out.querySelector("#exp-u-copy-id")?.addEventListener("click", async () => {
+            await Utils.copyText(p.id);
+            this.toast(`Copied User ID: ${p.id}`, "success");
+          });
+          out.querySelector("#exp-u-join")?.addEventListener("click", async () => {
+            try {
+              await Launcher.join(u.presence.placeId, u.presence.gameId, "current");
+              this.toast(`Joining @${p.name}...`, "success");
+            } catch (err) {
+              this.toast(err.message, "error");
+            }
+          });
+          out.querySelectorAll("[data-wear-copy]").forEach((b) => {
+            b.addEventListener("click", async () => {
+              await Utils.copyText(b.dataset.wearCopy);
+              this.toast(`Copied Asset ID: ${b.dataset.wearCopy}`, "success");
+            });
+          });
+          out.querySelectorAll("[data-wear-dev]").forEach((b) => {
+            b.addEventListener("click", () => this.openDevAsset(b.dataset.wearDev));
+          });
+        } catch (err) {
+          out.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
+        }
+      };
+
+      container.querySelector("#exp-user-go").addEventListener("click", () => loadUser(true));
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          loadUser(true);
+        }
+      });
+
+      loadUser(false);
     },
 
     /* ---------------- TAB 2: ACCOUNT VAULT & SWITCHER ---------------- */
@@ -2994,19 +4308,119 @@
       });
     },
 
-    /* ---------------- TAB 3: QUICK SETTINGS ---------------- */
+    /* ---------------- TAB 4: QUICK SETTINGS & WEBSITE QOL ---------------- */
     async renderSettingsTab(body) {
+      const localSettings = Store.getSettings();
+      const qolCardHtml = `
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
+            <span>Website QoL & Robux Converter</span>
+          </div>
+          <div class="rtk-col" style="margin-bottom:4px;">
+            <label class="rtk-label">Robux Fiat Price Overlay</label>
+            <select class="rtk-select" id="qol-currency-mode">
+              ${Object.entries(CURRENCY_MODES)
+                .map(([k, m]) => `<option value="${Utils.escapeHtml(k)}" ${localSettings.currencyMode === k ? "selected" : ""}>${Utils.escapeHtml(m.label)}</option>`)
+                .join("")}
+            </select>
+          </div>
+          <label class="rtk-switch-row">
+            <div>
+              <div class="rtk-label">Block Website Banner Ads</div>
+              <div class="rtk-muted">Hide skyscraper, leaderboard, and sponsorship ad frames</div>
+            </div>
+            ${renderToggleSwitch("qol-ads", localSettings.qolBlockAds)}
+          </label>
+          <label class="rtk-switch-row">
+            <div>
+              <div class="rtk-label">Hide Desktop App Upsell Banners</div>
+              <div class="rtk-muted">Suppress Roblox desktop app nag bars</div>
+            </div>
+            ${renderToggleSwitch("qol-banners", localSettings.qolHideAppBanners)}
+          </label>
+          <label class="rtk-switch-row">
+            <div>
+              <div class="rtk-label">Wide Website Layout</div>
+              <div class="rtk-muted">Expand main content container up to 1480px on large displays</div>
+            </div>
+            ${renderToggleSwitch("qol-wide", localSettings.qolWideLayout)}
+          </label>
+          <label class="rtk-switch-row">
+            <div>
+              <div class="rtk-label">In-Page Experience Insights Bar</div>
+              <div class="rtk-muted">Show exact Like Ratio %, Universe ID & Subplaces button on game pages</div>
+            </div>
+            ${renderToggleSwitch("qol-gamebar", localSettings.qolGameInsightsBar)}
+          </label>
+          <label class="rtk-switch-row">
+            <div>
+              <div class="rtk-label">In-Page Profile Insights Bar</div>
+              <div class="rtk-muted">Show Creation Date, Collectible RAP & Past Usernames on user profiles</div>
+            </div>
+            ${renderToggleSwitch("qol-profbar", localSettings.qolProfileStatsBar)}
+          </label>
+          <label class="rtk-switch-row">
+            <div>
+              <div class="rtk-label">In-Page Catalog / Asset Tools Bar</div>
+              <div class="rtk-muted">Show Copy ID, Extract Image ID & Raw Download buttons on item pages</div>
+            </div>
+            ${renderToggleSwitch("qol-assetbar", localSettings.qolAssetQuickBar)}
+          </label>
+        </div>
+      `;
+
+      const bindQolListeners = () => {
+        body.querySelector("#qol-currency-mode")?.addEventListener("change", (e) => {
+          Store.updateSettings({ currencyMode: e.target.value });
+          SiteQoL.applySettings();
+          this.toast("Updated Robux currency display.", "info");
+        });
+        const map = [
+          ["#qol-ads", "qolBlockAds"],
+          ["#qol-banners", "qolHideAppBanners"],
+          ["#qol-wide", "qolWideLayout"],
+          ["#qol-gamebar", "qolGameInsightsBar"],
+          ["#qol-profbar", "qolProfileStatsBar"],
+          ["#qol-assetbar", "qolAssetQuickBar"],
+        ];
+        map.forEach(([sel, key]) => {
+          body.querySelector(sel)?.addEventListener("change", (e) => {
+            Store.updateSettings({ [key]: e.target.checked });
+            SiteQoL.applySettings();
+            if (!e.target.checked) {
+              if (key === "qolGameInsightsBar") document.getElementById("rtk-game-insights-bar")?.remove();
+              if (key === "qolProfileStatsBar") document.getElementById("rtk-profile-insights-bar")?.remove();
+              if (key === "qolAssetQuickBar") document.getElementById("rtk-asset-quick-bar")?.remove();
+            } else {
+              GamePageUI.tickDomEnhancements();
+            }
+          });
+        });
+      };
+
       if (!AccountManager.activeUser) {
-        body.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Sign in to adjust privacy and experience settings.</div></div>`;
+        body.innerHTML = `
+          ${qolCardHtml}
+          <div class="rtk-card"><div class="rtk-muted">Sign in to adjust Roblox account privacy and chat settings.</div></div>
+        `;
+        bindQolListeners();
         return;
       }
 
       if (!QuickSettings.loaded) {
-        body.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Loading account settings...</div></div>`;
+        body.innerHTML = `
+          ${qolCardHtml}
+          <div class="rtk-card"><div class="rtk-muted">Loading account settings...</div></div>
+        `;
+        bindQolListeners();
         try {
           await QuickSettings.load();
         } catch (err) {
-          body.innerHTML = `<div class="rtk-alert">Failed to load settings: ${Utils.escapeHtml(err.message)}</div>`;
+          body.innerHTML = `
+            ${qolCardHtml}
+            <div class="rtk-alert">Failed to load settings: ${Utils.escapeHtml(err.message)}</div>
+          `;
+          bindQolListeners();
           return;
         }
       }
@@ -3031,6 +4445,8 @@
             <div class="rtk-muted">${chatMuted ? "Chat disabled. Click to unmute." : "Disable experience & app chat"}</div>
           </button>
         </div>
+
+        ${qolCardHtml}
 
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
@@ -3070,6 +4486,8 @@
             .join("")}
         </div>
       `;
+
+      bindQolListeners();
 
       body.querySelector("#qs-ghost-btn").addEventListener("click", async (e) => {
         e.currentTarget.disabled = true;
@@ -3283,11 +4701,14 @@
       });
     },
 
-    /* ---------------- TAB 5: DEVELOPER TOOLS ---------------- */
+    /* ---------------- TAB 6: DEVELOPER & ECONOMY TOOLS ---------------- */
     async renderDevToolsTab(body) {
       const ctx = DevTools.detectUrlContext();
-      const prefillAsset = ctx.type === "asset" ? ctx.id : "";
+      const autoAsset = this.pendingDevAssetId;
+      this.pendingDevAssetId = "";
+      const prefillAsset = autoAsset || (ctx.type === "asset" ? ctx.id : "");
       const snippets = DevTools.generateLuauSnippets();
+      const initCalc = SiteQoL.calcTaxAndDevEx(1000);
 
       body.innerHTML = `
         <div class="rtk-card rtk-col">
@@ -3297,6 +4718,35 @@
           </div>
           <div id="dt-inspector-rows" class="rtk-col">
             <div class="rtk-muted">Loading metadata...</div>
+          </div>
+        </div>
+
+        <div class="rtk-card rtk-col">
+          <div class="rtk-card-title">
+            <span>Marketplace 30% Fee & DevEx Calculator</span>
+            ${Icons.dollar}
+          </div>
+          <div class="rtk-col">
+            <label class="rtk-label">Robux Amount (R$)</label>
+            <input type="number" min="0" step="1" class="rtk-input" id="dt-tax-input" value="1000" placeholder="Enter Robux amount..." />
+          </div>
+          <div class="rtk-grid-2" id="dt-tax-grid">
+            <div class="rtk-stat-box">
+              <span class="rtk-muted">Seller Receives (70%)</span>
+              <span class="rtk-stat-val">R$ ${Utils.formatNumber(initCalc.afterTax)}</span>
+            </div>
+            <div class="rtk-stat-box">
+              <span class="rtk-muted">List Price Needed for Amount</span>
+              <span class="rtk-stat-val">R$ ${Utils.formatNumber(initCalc.grossNeeded)}</span>
+            </div>
+            <div class="rtk-stat-box">
+              <span class="rtk-muted">DevEx Cashout ($0.0038)</span>
+              <span class="rtk-stat-val">$${initCalc.devExUsd} USD</span>
+            </div>
+            <div class="rtk-stat-box">
+              <span class="rtk-muted">Purchase Value ($0.0125)</span>
+              <span class="rtk-stat-val">$${initCalc.purchaseUsd} USD</span>
+            </div>
           </div>
         </div>
 
@@ -3407,10 +4857,35 @@
         });
       });
 
-      body.querySelector("#dt-inspect-asset-btn").addEventListener("click", async (e) => {
+      body.querySelector("#dt-tax-input")?.addEventListener("input", (e) => {
+        const c = SiteQoL.calcTaxAndDevEx(e.target.value);
+        const grid = body.querySelector("#dt-tax-grid");
+        if (!grid) return;
+        grid.innerHTML = `
+          <div class="rtk-stat-box">
+            <span class="rtk-muted">Seller Receives (70%)</span>
+            <span class="rtk-stat-val">R$ ${Utils.formatNumber(c.afterTax)}</span>
+          </div>
+          <div class="rtk-stat-box">
+            <span class="rtk-muted">List Price Needed for Amount</span>
+            <span class="rtk-stat-val">R$ ${Utils.formatNumber(c.grossNeeded)}</span>
+          </div>
+          <div class="rtk-stat-box">
+            <span class="rtk-muted">DevEx Cashout ($0.0038)</span>
+            <span class="rtk-stat-val">$${c.devExUsd} USD</span>
+          </div>
+          <div class="rtk-stat-box">
+            <span class="rtk-muted">Purchase Value ($0.0125)</span>
+            <span class="rtk-stat-val">$${c.purchaseUsd} USD</span>
+          </div>
+        `;
+      });
+
+      const inspectAssetBtn = body.querySelector("#dt-inspect-asset-btn");
+      inspectAssetBtn.addEventListener("click", async () => {
         const idVal = body.querySelector("#dt-asset-id").value.trim();
         const out = body.querySelector("#dt-asset-result");
-        e.currentTarget.disabled = true;
+        inspectAssetBtn.disabled = true;
         out.innerHTML = `<div class="rtk-muted">Fetching asset stream...</div>`;
         try {
           const data = await DevTools.inspectAssetAndExtractIds(idVal);
@@ -3455,9 +4930,13 @@
         } catch (err) {
           out.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
         } finally {
-          e.currentTarget.disabled = false;
+          inspectAssetBtn.disabled = false;
         }
       });
+
+      if (autoAsset) {
+        inspectAssetBtn.click();
+      }
 
       body.querySelectorAll("[data-snip-idx]").forEach((btn) => {
         btn.addEventListener("click", async () => {
@@ -3744,11 +5223,50 @@
         margin-top: 8px;
         flex-wrap: wrap;
       }
+
+      .rtk-inline-bar {
+        background-color: #232527;
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin: 10px 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 10px;
+        font-family: "Builder Sans", "HCo Gotham SSm", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        color: #FFFFFF;
+        font-size: 13px;
+      }
+      .light-theme .rtk-inline-bar,
+      body.light-theme .rtk-inline-bar {
+        background-color: #FFFFFF;
+        color: #191B1D;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+      }
+      .rtk-inline-stats {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 14px;
+      }
+      .rtk-inline-stat-label {
+        color: #BDBEBE;
+        font-size: 12px;
+        margin-right: 4px;
+      }
+      .light-theme .rtk-inline-stat-label,
+      body.light-theme .rtk-inline-stat-label {
+        color: #606162;
+      }
     `;
     document.head.appendChild(st);
   }
 
   const GamePageUI = {
+    populatedGameBarPlace: null,
+    populatedProfileId: null,
+
     ensureNavbarButton() {
       injectInPageStyles();
       const pill = HubUI.shadow?.getElementById("rtk-pill");
@@ -3838,10 +5356,21 @@
           <button type="button" id="roblox-jobid-join-btn" class="rtk-srv-join-btn">Join</button>
         </div>
         <div class="rtk-srv-row" style="margin-top:10px;">
+          <button type="button" class="rtk-srv-chip" id="rtk-srv-hop">${Icons.shuffle}<span>Server Hop</span></button>
           <button type="button" class="rtk-srv-chip" id="rtk-srv-smallest">Smallest Server</button>
           <button type="button" class="rtk-srv-chip" id="rtk-srv-ping">Lowest Ping</button>
+          <button type="button" class="rtk-srv-chip" id="rtk-srv-find-toggle">${Icons.search}<span>Find Player</span></button>
+          <button type="button" class="rtk-srv-chip" id="rtk-srv-pin">${Icons.pin}<span>Pin Job ID</span></button>
           <button type="button" class="rtk-srv-chip" id="rtk-srv-copy-live">${Icons.copy}<span>Copy Active Job ID</span></button>
           <button type="button" class="rtk-srv-chip" id="rtk-srv-manage-acc">${Icons.users}<span>Accounts</span></button>
+        </div>
+        <div id="rtk-srv-finder-panel" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.1);">
+          <div class="rtk-srv-row">
+            <input type="text" id="rtk-srv-finder-input" class="rtk-srv-input" placeholder="Enter Roblox username or User ID to locate in public servers..." autocomplete="off" />
+            <button type="button" id="rtk-srv-finder-go" class="rtk-srv-join-btn" style="background:#FFFFFF;color:#191B1D;">Scan</button>
+            <button type="button" id="rtk-srv-finder-stop" class="rtk-srv-chip" style="display:none;height:38px;color:#F74B52;">Stop</button>
+          </div>
+          <div id="rtk-srv-finder-result" style="margin-top:8px;font-size:13px;"></div>
         </div>
         <div id="roblox-jobid-status"></div>
       `;
@@ -3874,6 +5403,16 @@
         }
       });
 
+      box.querySelector("#rtk-srv-hop").addEventListener("click", async () => {
+        try {
+          this.showServerBarStatus("Finding fresh server to hop into...", "#BDBEBE");
+          const s = await Launcher.serverHop(Utils.getPlaceIdFromPage(), accSelect.value);
+          this.showServerBarStatus(`Hopping to server (${s.playing}/${s.maxPlayers} players)...`, "#00B06F");
+        } catch (err) {
+          this.showServerBarStatus(err.message, "#F74B52");
+        }
+      });
+
       box.querySelector("#rtk-srv-smallest").addEventListener("click", async () => {
         try {
           this.showServerBarStatus("Finding smallest server...", "#BDBEBE");
@@ -3894,6 +5433,82 @@
         }
       });
 
+      box.querySelector("#rtk-srv-pin").addEventListener("click", async () => {
+        const rawJob = input.value.trim() || PlaytimeTracker.getData().activeSession?.gameId || "";
+        if (!rawJob) {
+          this.showServerBarStatus("Paste a Job ID in the input above (or be in an active server) to pin it.", "#F74B52");
+          return;
+        }
+        const label = window.prompt("Optional label for pinned server:", "") ?? "";
+        try {
+          await PinnedServers.pin({ jobId: rawJob, placeId: Utils.getPlaceIdFromPage(), label });
+          this.showServerBarStatus("Pinned server to Toolkit!", "#00B06F");
+        } catch (err) {
+          this.showServerBarStatus(err.message, "#F74B52");
+        }
+      });
+
+      // Inline Player Finder
+      const finderPanel = box.querySelector("#rtk-srv-finder-panel");
+      const finderInput = box.querySelector("#rtk-srv-finder-input");
+      const finderGo = box.querySelector("#rtk-srv-finder-go");
+      const finderStop = box.querySelector("#rtk-srv-finder-stop");
+      const finderRes = box.querySelector("#rtk-srv-finder-result");
+
+      box.querySelector("#rtk-srv-find-toggle").addEventListener("click", () => {
+        const open = finderPanel.style.display === "none";
+        finderPanel.style.display = open ? "block" : "none";
+        if (open) finderInput.focus();
+      });
+
+      const runInlineScan = async () => {
+        const q = finderInput.value.trim();
+        const pId = Utils.getPlaceIdFromPage();
+        if (!q) return;
+        finderGo.style.display = "none";
+        finderStop.style.display = "inline-flex";
+        finderRes.textContent = "Resolving user & scanning public server tokens...";
+        try {
+          const res = await ServerScanner.findPlayerInServers(pId, q, (prog) => {
+            finderRes.textContent = `Scanning @${prog.username} — Page ${prog.page}/15 (${Utils.formatNumber(prog.serversChecked)} servers, ${Utils.formatNumber(prog.playersChecked)} players)...`;
+          });
+          if (res.found && res.server) {
+            finderRes.innerHTML = `
+              <div class="rtk-srv-row" style="justify-content:space-between;">
+                <span>Found <b>@${Utils.escapeHtml(res.user.name)}</b> in <code>${Utils.escapeHtml(res.server.id)}</code> (${res.server.playing}/${res.server.maxPlayers})</span>
+                <div class="rtk-srv-row">
+                  <button type="button" class="rtk-srv-chip" id="rtk-inline-found-copy">${Icons.copy}<span>Copy</span></button>
+                  <button type="button" class="rtk-srv-join-btn" id="rtk-inline-found-join" style="height:32px;padding:0 14px;font-size:13px;">Join</button>
+                </div>
+              </div>
+            `;
+            finderRes.querySelector("#rtk-inline-found-copy")?.addEventListener("click", () => {
+              Utils.copyText(res.server.id);
+              HubUI.toast("Copied Job ID.", "success");
+            });
+            finderRes.querySelector("#rtk-inline-found-join")?.addEventListener("click", () => {
+              Launcher.join(pId, res.server.id, accSelect.value).catch((e) => HubUI.toast(e.message, "error"));
+            });
+          } else {
+            finderRes.textContent = `@${res.user.name} was not found in the first ${Utils.formatNumber(res.serversChecked)} public servers.`;
+          }
+        } catch (err) {
+          finderRes.textContent = err.message;
+        } finally {
+          finderGo.style.display = "inline-flex";
+          finderStop.style.display = "none";
+        }
+      };
+
+      finderGo.addEventListener("click", runInlineScan);
+      finderInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          runInlineScan();
+        }
+      });
+      finderStop.addEventListener("click", () => ServerScanner.abort());
+
       box.querySelector("#rtk-srv-copy-live").addEventListener("click", async () => {
         await PlaytimeTracker.poll();
         const liveJob = PlaytimeTracker.getData().activeSession?.gameId;
@@ -3910,7 +5525,8 @@
     },
 
     ensurePlayAsBar() {
-      if (!Utils.getPlaceIdFromPage()) return;
+      const placeId = Utils.getPlaceIdFromPage();
+      if (!placeId) return;
       if (document.getElementById("rtk-play-as-bar")) return;
 
       const playContainer = document.getElementById("game-details-play-button-container");
@@ -3926,6 +5542,9 @@
         <button type="button" id="rtk-main-play-as-btn" class="rtk-srv-chip" style="height:34px;padding:0 14px;">
           ${Icons.play}<span>Play As</span>
         </button>
+        <button type="button" id="rtk-main-hop-btn" class="rtk-srv-chip" style="height:34px;padding:0 12px;" title="Server Hop">
+          ${Icons.shuffle}<span>Hop</span>
+        </button>
       `;
 
       playContainer.parentElement.insertBefore(bar, playContainer.nextSibling);
@@ -3937,6 +5556,162 @@
           HubUI.toast("Launching Roblox...", "success");
         } catch (err) {
           HubUI.toast(err.message, "error");
+        }
+      });
+
+      bar.querySelector("#rtk-main-hop-btn").addEventListener("click", async () => {
+        const accId = bar.querySelector("#rtk-main-play-acc").value;
+        try {
+          const s = await Launcher.serverHop(Utils.getPlaceIdFromPage(), accId);
+          HubUI.toast(`Hopping to server (${s.playing}/${s.maxPlayers})...`, "success");
+        } catch (err) {
+          HubUI.toast(err.message, "error");
+        }
+      });
+    },
+
+    ensureGameInsightsBar() {
+      const placeId = Utils.getPlaceIdFromPage();
+      if (!placeId || !Store.getSettings().qolGameInsightsBar) return;
+      if (document.getElementById("rtk-game-insights-bar")) return;
+
+      const anchor =
+        document.querySelector(".game-calls-to-action") ||
+        document.getElementById("game-details-play-button-container")?.parentElement;
+      if (!anchor) return;
+
+      injectInPageStyles();
+      const bar = document.createElement("div");
+      bar.id = "rtk-game-insights-bar";
+      bar.className = "rtk-inline-bar";
+      bar.innerHTML = `<span class="rtk-inline-stat-label">Loading experience insights...</span>`;
+      anchor.appendChild(bar);
+
+      ExplorerEngine.inspectExperience(placeId)
+        .then((data) => {
+          if (!bar.isConnected) return;
+          bar.innerHTML = `
+            <div class="rtk-inline-stats">
+              <span>${Icons.thumbsUp} <b>${data.likeRatio !== null ? `${data.likeRatio}%` : "—"}</b> <span class="rtk-inline-stat-label">Rating</span></span>
+              <span><b>${data.places.length}</b> <span class="rtk-inline-stat-label">Place${data.places.length === 1 ? "" : "s"}</span></span>
+            </div>
+            <div class="rtk-srv-row" style="gap:6px;">
+              <button type="button" class="rtk-srv-chip" id="rtk-gi-subplaces" style="height:28px;font-size:12px;">${Icons.layers}<span>Subplaces (${data.places.length})</span></button>
+              <button type="button" class="rtk-srv-chip" id="rtk-gi-univ" style="height:28px;font-size:12px;" title="Copy Universe ID">${Icons.copy}<span>Univ ${Utils.escapeHtml(data.universeId)}</span></button>
+            </div>
+          `;
+          bar.querySelector("#rtk-gi-subplaces")?.addEventListener("click", () => {
+            HubUI.openExplore({ mode: "experience", query: placeId, subtab: "places" });
+          });
+          bar.querySelector("#rtk-gi-univ")?.addEventListener("click", async () => {
+            await Utils.copyText(data.universeId);
+            HubUI.toast(`Copied Universe ID: ${data.universeId}`, "success");
+          });
+        })
+        .catch(() => {
+          bar.remove();
+        });
+    },
+
+    ensureProfileInsightsBar() {
+      if (!Store.getSettings().qolProfileStatsBar) return;
+      const m = window.location.pathname.match(/\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?users\/(\d+)\/profile/i);
+      if (!m) return;
+      const userId = m[1];
+      if (document.getElementById("rtk-profile-insights-bar")) return;
+
+      const headerAnchor =
+        document.querySelector(".profile-header") ||
+        document.getElementById("profile-header-container") ||
+        document.querySelector(".profile-container .section");
+      if (!headerAnchor || !headerAnchor.parentElement) return;
+
+      injectInPageStyles();
+      const bar = document.createElement("div");
+      bar.id = "rtk-profile-insights-bar";
+      bar.className = "rtk-inline-bar";
+      bar.innerHTML = `<span class="rtk-inline-stat-label">Loading profile insights...</span>`;
+      headerAnchor.parentElement.insertBefore(bar, headerAnchor.nextSibling);
+
+      ExplorerEngine.inspectUser(userId)
+        .then((u) => {
+          if (!bar.isConnected) return;
+          const years = (u.accountAgeDays / 365.25).toFixed(1);
+          const rapText = u.collectibles.privateInventory
+            ? "Private"
+            : `R$ ${Utils.formatNumber(u.collectibles.totalRap)}${SiteQoL.formatFiat(u.collectibles.totalRap)}`;
+          bar.innerHTML = `
+            <div class="rtk-inline-stats">
+              <span><span class="rtk-inline-stat-label">Joined</span><b>${Utils.formatDateShort(u.profile.created)}</b> <span class="rtk-inline-stat-label">(${years}y / ${Utils.formatNumber(u.accountAgeDays)}d)</span></span>
+              <span><span class="rtk-inline-stat-label">Collectible RAP</span><b>${Utils.escapeHtml(rapText)}</b></span>
+              ${u.pastNames.length > 0 ? `<span title="${Utils.escapeHtml(u.pastNames.join(", "))}"><span class="rtk-inline-stat-label">Past Names</span><b>${u.pastNames.length}</b></span>` : ""}
+            </div>
+            <div class="rtk-srv-row" style="gap:6px;">
+              <button type="button" class="rtk-srv-chip" id="rtk-pi-explore" style="height:28px;font-size:12px;">${Icons.compass}<span>Inspect Outfit & RAP (${u.wearingIds.length})</span></button>
+              <button type="button" class="rtk-srv-chip" id="rtk-pi-copyid" style="height:28px;font-size:12px;">${Icons.copy}<span>ID ${Utils.escapeHtml(u.userId)}</span></button>
+            </div>
+          `;
+          bar.querySelector("#rtk-pi-explore")?.addEventListener("click", () => {
+            HubUI.openExplore({ mode: "user", query: userId });
+          });
+          bar.querySelector("#rtk-pi-copyid")?.addEventListener("click", async () => {
+            await Utils.copyText(u.userId);
+            HubUI.toast(`Copied User ID: ${u.userId}`, "success");
+          });
+        })
+        .catch(() => {
+          bar.remove();
+        });
+    },
+
+    ensureAssetQuickBar() {
+      if (!Store.getSettings().qolAssetQuickBar) return;
+      const ctx = DevTools.detectUrlContext();
+      if (ctx.type !== "asset" || !ctx.id) return;
+      if (document.getElementById("rtk-asset-quick-bar")) return;
+
+      const anchor =
+        document.querySelector("#item-details") ||
+        document.querySelector(".item-details-section") ||
+        document.querySelector(".item-purchase-container") ||
+        document.querySelector("[class*='item-details-info']");
+      if (!anchor) return;
+
+      injectInPageStyles();
+      const bar = document.createElement("div");
+      bar.id = "rtk-asset-quick-bar";
+      bar.className = "rtk-inline-bar";
+      bar.innerHTML = `
+        <div class="rtk-inline-stats">
+          <span><span class="rtk-inline-stat-label">Asset ID</span><b>${Utils.escapeHtml(ctx.id)}</b></span>
+        </div>
+        <div class="rtk-srv-row" style="gap:6px;">
+          <button type="button" class="rtk-srv-chip" id="rtk-aq-copy" style="height:28px;font-size:12px;">${Icons.copy}<span>Copy ID</span></button>
+          <button type="button" class="rtk-srv-chip" id="rtk-aq-extract" style="height:28px;font-size:12px;">${Icons.code}<span>Extract Image / Template ID</span></button>
+          <button type="button" class="rtk-srv-chip" id="rtk-aq-dl" style="height:28px;font-size:12px;">${Icons.download}<span>Download Raw</span></button>
+        </div>
+      `;
+      anchor.appendChild(bar);
+
+      bar.querySelector("#rtk-aq-copy").addEventListener("click", async () => {
+        await Utils.copyText(ctx.id);
+        HubUI.toast(`Copied Asset ID: ${ctx.id}`, "success");
+      });
+      bar.querySelector("#rtk-aq-extract").addEventListener("click", () => {
+        HubUI.openDevAsset(ctx.id);
+      });
+      bar.querySelector("#rtk-aq-dl").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        try {
+          const data = await DevTools.inspectAssetAndExtractIds(ctx.id);
+          const safeName = data.name.replace(/[^a-z0-9_-]+/gi, "_").slice(0, 40);
+          DevTools.triggerBlobDownload(data.buffer, `${safeName}_${data.assetId}.${data.format.ext}`, data.format.mime);
+          HubUI.toast(`Downloaded ${safeName}.${data.format.ext}`, "success");
+        } catch (err) {
+          HubUI.toast(err.message, "error");
+        } finally {
+          btn.disabled = false;
         }
       });
     },
@@ -3957,6 +5732,7 @@
         tools.innerHTML = `
           <button type="button" class="rtk-srv-chip" data-card-copy="${Utils.escapeHtml(jobId)}" title="${Utils.escapeHtml(jobId)}">${Icons.copy}<span>Job ID</span></button>
           <button type="button" class="rtk-srv-chip" data-card-link="${Utils.escapeHtml(jobId)}">${Icons.link}<span>Link</span></button>
+          <button type="button" class="rtk-srv-chip" data-card-pin="${Utils.escapeHtml(jobId)}">${Icons.pin}<span>Pin</span></button>
           <button type="button" class="rtk-srv-chip" data-card-joinas="${Utils.escapeHtml(jobId)}">${Icons.users}<span>Join As</span></button>
         `;
 
@@ -3970,6 +5746,16 @@
           const url = `https://www.roblox.com/games/${placeId}/-?serverJobId=${jobId}`;
           await Utils.copyText(url);
           HubUI.toast("Copied shareable server link.", "success");
+        });
+
+        tools.querySelector("[data-card-pin]").addEventListener("click", async () => {
+          const label = window.prompt("Optional label for pinned server:", "") ?? "";
+          try {
+            await PinnedServers.pin({ jobId, placeId: Utils.getPlaceIdFromPage(), label });
+            HubUI.toast("Pinned server.", "success");
+          } catch (err) {
+            HubUI.toast(err.message, "error");
+          }
         });
 
         tools.querySelector("[data-card-joinas]").addEventListener("click", async () => {
@@ -3993,7 +5779,11 @@
       this.ensureNavbarButton();
       this.ensureServersTabPanel();
       this.ensurePlayAsBar();
+      this.ensureGameInsightsBar();
+      this.ensureProfileInsightsBar();
+      this.ensureAssetQuickBar();
       this.enhanceServerCards();
+      SiteQoL.annotateRobuxPricesOnPage();
     },
   };
 
@@ -4078,6 +5868,7 @@
 
   /* ---------------- MAIN BOOTSTRAP ---------------- */
   async function bootstrap() {
+    SiteQoL.applySettings();
     HubUI.init();
     GamePageUI.tickDomEnhancements();
     setupLogoutGuard();
@@ -4096,6 +5887,10 @@
     Store.onChange(STORAGE_KEYS.ACCOUNTS, () => {
       GamePageUI.refreshAccountSelectors();
       if (HubUI.isOpen && HubUI.activeTab === "accounts") HubUI.renderActiveTab();
+    });
+
+    Store.onChange(STORAGE_KEYS.SETTINGS, () => {
+      SiteQoL.applySettings();
     });
 
     await AccountManager.initAndAutoCapture();
