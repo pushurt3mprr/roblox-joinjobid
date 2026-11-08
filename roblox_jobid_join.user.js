@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roblox Multi-Tool & Job ID Joiner
 // @namespace    https://github.com/pushurt3mprr
-// @version      2.0.0
+// @version      2.0.1
 // @description  All-in-one Roblox toolkit for Firefox: Job ID Joiner, Real-Time Account Switcher (.ROBLOSECURITY vault), Join As Account, Quick Privacy/Chat Settings, Playtime Tracker & Developer Tools.
 // @author       pushurt3mprr
 // @match        https://*.roblox.com/*
@@ -31,7 +31,7 @@
   /* ============================================================================
    * 1. CONSTANTS & UTILITIES
    * ============================================================================ */
-  const APP_VERSION = "2.0.0";
+  const APP_VERSION = "2.0.1";
   const TAB_ID = (typeof crypto !== "undefined" && crypto.randomUUID)
     ? crypto.randomUUID()
     : "tab-" + Math.random().toString(36).slice(2) + "-" + Date.now();
@@ -617,16 +617,19 @@
     },
 
     async getUserSettingsAndOptions() {
-      const rich = await this.request({
-        url: "https://apis.roblox.com/user-settings-api/v1/user-settings/settings-and-options",
-      });
-      if (rich.ok && rich.data) return { mode: "options", data: rich.data };
+      const [flatRes, optRes] = await Promise.all([
+        this.request({ url: "https://apis.roblox.com/user-settings-api/v1/user-settings" }).catch(() => ({ ok: false })),
+        this.request({ url: "https://apis.roblox.com/user-settings-api/v1/user-settings/settings-and-options" }).catch(() => ({ ok: false })),
+      ]);
 
-      const basic = await this.request({
-        url: "https://apis.roblox.com/user-settings-api/v1/user-settings",
-      });
-      if (basic.ok && basic.data) return { mode: "values", data: basic.data };
-      throw new Error(`Failed to load user settings (HTTP ${basic.status})`);
+      if (!flatRes.ok && !optRes.ok) {
+        throw new Error(`Failed to load user settings (HTTP ${flatRes.status || optRes.status || 0})`);
+      }
+
+      return {
+        flat: flatRes.ok && flatRes.data && typeof flatRes.data === "object" ? flatRes.data : {},
+        options: optRes.ok && optRes.data && typeof optRes.data === "object" ? optRes.data : {},
+      };
     },
 
     async updateUserSettings(payload) {
@@ -1157,19 +1160,46 @@
   const OPTION_LABELS = {
     AllUsers: "Everyone",
     All: "Everyone",
-    FriendsFollowingAndFollowers: "Friends, Following & Followers",
-    FriendsAndFollowing: "Friends & Following",
-    Friends: "Friends Only",
-    TopFriends: "Friends Only",
-    NoOne: "No One (Disabled / Hidden)",
+    FriendsFollowingAndFollowers: "Friends, Following, and Followers",
+    FriendsAndFollowing: "Friends and Users I Follow",
+    Followers: "Followers",
+    Following: "Users I Follow",
+    Friends: "Friends",
+    TopFriends: "Friends",
+    TrustedFriends: "Connections",
+    Contacts: "Contacts",
+    NoOne: "No one",
     Off: "Off",
-    Dark: "Dark Mode",
-    Light: "Light Mode",
+    Disabled: "Off",
+    Default: "Default",
+    Dark: "Dark",
+    Light: "Light",
     None: "None",
     Low: "Low",
     Medium: "Medium",
     High: "High",
   };
+
+  function extractSettingString(item, depth = 0) {
+    if (item === null || item === undefined || depth > 5) return null;
+    if (typeof item === "string") return item.trim() || null;
+    if (typeof item === "number" || typeof item === "boolean") return String(item);
+    if (typeof item === "object" && !Array.isArray(item)) {
+      const priorityKeys = ["optionValue", "currentValue", "value", "option", "name", "key", "id"];
+      for (const k of priorityKeys) {
+        if (Object.prototype.hasOwnProperty.call(item, k) && item[k] !== item) {
+          const unwrapped = extractSettingString(item[k], depth + 1);
+          if (unwrapped) return unwrapped;
+        }
+      }
+      for (const v of Object.values(item)) {
+        if (typeof v === "string" && v.trim() && v.length < 64) {
+          return v.trim();
+        }
+      }
+    }
+    return null;
+  }
 
   const QuickSettings = {
     values: {},
@@ -1177,29 +1207,51 @@
     loaded: false,
 
     formatOption(opt) {
-      return OPTION_LABELS[opt] || String(opt).replace(/([a-z])([A-Z])/g, "$1 $2");
+      const clean = extractSettingString(opt);
+      if (!clean) return "Unknown";
+      return OPTION_LABELS[clean] || clean.replace(/([a-z])([A-Z])/g, "$1 $2");
     },
 
     async load() {
-      const result = await RobloxAPI.getUserSettingsAndOptions();
-      const raw = result.data || {};
+      const { flat, options } = await RobloxAPI.getUserSettingsAndOptions();
       const nextValues = {};
       const nextOptions = {};
 
       for (const def of SETTING_DEFINITIONS) {
-        const entry = raw[def.key];
-        if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-          const val = entry.currentValue ?? entry.value ?? "";
-          const opts = Array.isArray(entry.options)
-            ? entry.options.map((o) => (typeof o === "object" ? o.value || o.option : o)).filter(Boolean)
-            : def.fallbackOptions;
-          if (val !== "") nextValues[def.key] = val;
-          nextOptions[def.key] = opts.length ? opts : def.fallbackOptions;
-        } else if (entry !== undefined && entry !== null) {
-          nextValues[def.key] = String(entry);
-          nextOptions[def.key] = def.fallbackOptions;
-        } else {
-          nextOptions[def.key] = def.fallbackOptions;
+        const flatEntry = flat[def.key];
+        const optEntry = options[def.key];
+
+        const curVal =
+          extractSettingString(flatEntry) ??
+          extractSettingString(optEntry?.currentValue) ??
+          extractSettingString(optEntry?.value) ??
+          extractSettingString(optEntry);
+
+        let rawOpts = null;
+        if (optEntry && typeof optEntry === "object" && !Array.isArray(optEntry)) {
+          rawOpts =
+            optEntry.optionValues ||
+            optEntry.options ||
+            optEntry.allowedOptions ||
+            optEntry.validOptions ||
+            null;
+        }
+
+        let parsedOpts = [];
+        if (Array.isArray(rawOpts)) {
+          parsedOpts = rawOpts.map((o) => extractSettingString(o)).filter(Boolean);
+        }
+
+        if (parsedOpts.length === 0) {
+          parsedOpts = def.fallbackOptions.slice();
+        }
+        if (curVal && !parsedOpts.includes(curVal)) {
+          parsedOpts.unshift(curVal);
+        }
+
+        nextOptions[def.key] = Array.from(new Set(parsedOpts));
+        if (curVal) {
+          nextValues[def.key] = curVal;
         }
       }
 
@@ -1214,7 +1266,7 @@
       for (const candidate of preferredList) {
         if (allowed.includes(candidate)) return candidate;
       }
-      return preferredList[0];
+      return allowed[0] || preferredList[0];
     },
 
     applyThemeToDom(theme) {
@@ -1224,6 +1276,9 @@
         el.classList.toggle("dark-theme", isDark);
         el.classList.toggle("light-theme", !isDark);
       });
+      if (typeof HubUI !== "undefined" && HubUI.syncTheme) {
+        HubUI.syncTheme();
+      }
     },
 
     async update(patch) {
@@ -1781,30 +1836,93 @@
   };
 
   /* ============================================================================
-   * 10. SHADOW-DOM COMMAND HUB UI & TOAST SYSTEM
+   * 10. ROBLOX FOUNDATION DESIGN SYSTEM, SVG ICONS & SHADOW-DOM HUB UI
    * ============================================================================ */
+  const Icons = {
+    toolkit: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>`,
+    play: `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>`,
+    server: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><circle cx="6" cy="6.5" r="1" fill="currentColor"/><circle cx="6" cy="17.5" r="1" fill="currentColor"/></svg>`,
+    users: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+    clock: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
+    code: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`,
+    copy: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+    link: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
+    refresh: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`,
+    eyeOff: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`,
+    chatOff: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>`,
+    download: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+    plus: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+    tag: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>`,
+    close: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+  };
+
   const HUB_CSS = `
     :host {
       all: initial;
-      font-family: "Builder Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      color: #f1f5f9;
-      font-size: 13px;
-      line-height: 1.45;
+      --rbx-bg-canvas: #191B1D;
+      --rbx-bg-surface: #232527;
+      --rbx-bg-elevated: #2B2D2F;
+      --rbx-bg-hover: rgba(255, 255, 255, 0.08);
+      --rbx-bg-input: #191B1D;
+      --rbx-text: #FFFFFF;
+      --rbx-text-secondary: #BDBEBE;
+      --rbx-border: rgba(255, 255, 255, 0.1);
+      --rbx-border-strong: rgba(255, 255, 255, 0.24);
+      --rbx-border-focus: #FFFFFF;
+      --rbx-cta-bg: #FFFFFF;
+      --rbx-cta-text: #191B1D;
+      --rbx-cta-hover: #E3E5E7;
+      --rbx-growth: #00B06F;
+      --rbx-growth-hover: #009E63;
+      --rbx-danger: #F74B52;
+      --rbx-warning-bg: rgba(247, 185, 40, 0.12);
+      --rbx-warning-border: rgba(247, 185, 40, 0.35);
+      --rbx-warning-text: #FDE68A;
+      --rbx-code-bg: #121315;
+      --rbx-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23BDBEBE' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+
+      font-family: "Builder Sans", "HCo Gotham SSm", "Helvetica Neue", Helvetica, Arial, "Lucida Grande", sans-serif;
+      color: var(--rbx-text);
+      font-size: 14px;
+      line-height: 1.4;
+      color-scheme: dark;
     }
+
+    :host(.theme-light) {
+      --rbx-bg-canvas: #F2F4F5;
+      --rbx-bg-surface: #FFFFFF;
+      --rbx-bg-elevated: #F2F4F5;
+      --rbx-bg-hover: rgba(0, 0, 0, 0.05);
+      --rbx-bg-input: #F2F4F5;
+      --rbx-text: #191B1D;
+      --rbx-text-secondary: #606162;
+      --rbx-border: rgba(0, 0, 0, 0.1);
+      --rbx-border-strong: rgba(0, 0, 0, 0.22);
+      --rbx-border-focus: #191B1D;
+      --rbx-cta-bg: #191B1D;
+      --rbx-cta-text: #FFFFFF;
+      --rbx-cta-hover: #393B3D;
+      --rbx-warning-bg: rgba(217, 119, 6, 0.1);
+      --rbx-warning-border: rgba(217, 119, 6, 0.35);
+      --rbx-warning-text: #92400E;
+      --rbx-code-bg: #F2F4F5;
+      --rbx-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23606162' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+      color-scheme: light;
+    }
+
     * { box-sizing: border-box; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb { background: var(--rbx-border-strong); border-radius: 3px; }
 
     .rtk-backdrop {
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.55);
-      backdrop-filter: blur(2px);
+      background: rgba(0, 0, 0, 0.5);
       z-index: 2147483640;
       opacity: 0;
       pointer-events: none;
-      transition: opacity 0.18s ease;
+      transition: opacity 0.16s ease;
     }
     .rtk-backdrop.open {
       opacity: 1;
@@ -1818,85 +1936,106 @@
       width: 480px;
       max-width: 96vw;
       height: 100vh;
-      background: #141619;
-      border-left: 1px solid rgba(255, 255, 255, 0.1);
-      box-shadow: -12px 0 36px rgba(0, 0, 0, 0.6);
+      background: var(--rbx-bg-canvas);
+      border-left: 1px solid var(--rbx-border);
+      box-shadow: -8px 0 28px rgba(0, 0, 0, 0.45);
       z-index: 2147483641;
       display: flex;
       flex-direction: column;
       transform: translateX(104%);
-      transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+      color: var(--rbx-text);
     }
     .rtk-drawer.open {
       transform: translateX(0);
     }
 
     .rtk-header {
-      padding: 14px 18px;
-      background: #191c20;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      height: 54px;
+      padding: 0 18px;
+      background: var(--rbx-bg-surface);
+      border-bottom: 1px solid var(--rbx-border);
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
+      flex-shrink: 0;
     }
     .rtk-brand {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 9px;
       font-weight: 700;
-      font-size: 15px;
-      color: #ffffff;
+      font-size: 16px;
+      letter-spacing: -0.01em;
+      color: var(--rbx-text);
     }
     .rtk-badge {
       font-size: 11px;
       font-weight: 600;
-      padding: 2px 7px;
+      padding: 2px 8px;
       border-radius: 999px;
-      background: rgba(0, 176, 111, 0.18);
-      color: #34d399;
-      border: 1px solid rgba(0, 176, 111, 0.35);
+      background: var(--rbx-bg-elevated);
+      color: var(--rbx-text-secondary);
+      border: 1px solid var(--rbx-border);
     }
-    .rtk-close-btn {
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.1);
-      color: #cbd5e1;
-      width: 30px;
-      height: 30px;
-      border-radius: 6px;
+    .rtk-badge-live {
+      background: rgba(0, 176, 111, 0.16);
+      color: #00B06F;
+      border-color: rgba(0, 176, 111, 0.35);
+    }
+    .rtk-icon-btn {
+      background: transparent;
+      border: none;
+      color: var(--rbx-text-secondary);
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
       cursor: pointer;
-      font-size: 16px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      transition: background 0.12s, color 0.12s;
     }
-    .rtk-close-btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
+    .rtk-icon-btn:hover {
+      background: var(--rbx-bg-hover);
+      color: var(--rbx-text);
+    }
 
+    /* Roblox Native Underline Navigation Tabs */
     .rtk-tabs {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
-      background: #191c20;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      padding: 0 8px;
-      gap: 2px;
+      background: var(--rbx-bg-surface);
+      border-bottom: 1px solid var(--rbx-border);
+      flex-shrink: 0;
     }
     .rtk-tab {
       background: transparent;
       border: none;
       border-bottom: 2px solid transparent;
-      color: #94a3b8;
-      padding: 10px 4px;
-      font-size: 12px;
+      color: var(--rbx-text-secondary);
+      height: 42px;
+      padding: 0 4px;
+      font-size: 13px;
       font-weight: 600;
+      font-family: inherit;
       cursor: pointer;
-      text-align: center;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
       white-space: nowrap;
-      transition: color 0.15s, border-color 0.15s;
+      transition: color 0.12s, background 0.12s, border-color 0.12s;
     }
-    .rtk-tab:hover { color: #e2e8f0; }
+    .rtk-tab:hover {
+      color: var(--rbx-text);
+      background: var(--rbx-bg-hover);
+    }
     .rtk-tab.active {
-      color: #00d284;
-      border-bottom-color: #00b06f;
+      color: var(--rbx-text);
+      border-bottom-color: var(--rbx-text);
+      font-weight: 700;
     }
 
     .rtk-body {
@@ -1905,132 +2044,253 @@
       padding: 16px;
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 12px;
     }
 
+    /* Roblox Section Content Card */
     .rtk-card {
-      background: #1d2025;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 10px;
-      padding: 14px;
+      background: var(--rbx-bg-surface);
+      border-radius: 8px;
+      padding: 16px;
     }
     .rtk-card-title {
-      font-size: 13px;
+      font-size: 15px;
       font-weight: 700;
-      color: #f8fafc;
-      margin: 0 0 10px 0;
+      color: var(--rbx-text);
+      margin: 0 0 12px 0;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
     }
-    .rtk-muted { color: #94a3b8; font-size: 12px; }
+    .rtk-muted {
+      color: var(--rbx-text-secondary);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .rtk-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--rbx-text);
+    }
 
     .rtk-row { display: flex; gap: 8px; align-items: center; }
     .rtk-col { display: flex; flex-direction: column; gap: 8px; }
     .rtk-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
+    /* Roblox Native Inputs & Selects */
     .rtk-input, .rtk-select, .rtk-textarea {
       width: 100%;
-      background: #121417;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      color: #f1f5f9;
-      border-radius: 7px;
-      padding: 8px 10px;
-      font-size: 13px;
+      height: 38px;
+      background-color: var(--rbx-bg-input);
+      border: 1px solid var(--rbx-border-strong);
+      color: var(--rbx-text);
+      border-radius: 8px;
+      padding: 0 12px;
+      font-size: 14px;
       font-family: inherit;
       outline: none;
+      transition: border-color 0.12s;
+    }
+    .rtk-select {
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: var(--rbx-chevron);
+      background-repeat: no-repeat;
+      background-position: right 11px center;
+      padding-right: 34px;
+      cursor: pointer;
+    }
+    .rtk-select option {
+      background-color: var(--rbx-bg-surface);
+      color: var(--rbx-text);
     }
     .rtk-textarea {
-      min-height: 70px;
+      height: auto;
+      min-height: 74px;
+      padding: 8px 12px;
       resize: vertical;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
     }
+    .rtk-input:hover, .rtk-select:hover, .rtk-textarea:hover {
+      border-color: var(--rbx-text-secondary);
+    }
     .rtk-input:focus, .rtk-select:focus, .rtk-textarea:focus {
-      border-color: #00b06f;
-      box-shadow: 0 0 0 2px rgba(0, 176, 111, 0.2);
+      border-color: var(--rbx-border-focus);
     }
 
+    /* Roblox Foundation Buttons */
     .rtk-btn {
-      height: 34px;
-      padding: 0 12px;
-      border-radius: 7px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      background: #272b32;
-      color: #f1f5f9;
-      font-size: 12px;
+      height: 36px;
+      padding: 0 14px;
+      border-radius: 8px;
+      border: 1px solid var(--rbx-border-strong);
+      background: transparent;
+      color: var(--rbx-text);
+      font-size: 13px;
       font-weight: 600;
+      font-family: inherit;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
       white-space: nowrap;
-      transition: background 0.14s, border-color 0.14s;
+      transition: background 0.12s, border-color 0.12s, opacity 0.12s;
     }
-    .rtk-btn:hover { background: #323741; }
-    .rtk-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .rtk-btn-primary {
-      background: #00b06f;
-      border-color: #00b06f;
-      color: #ffffff;
+    .rtk-btn:hover {
+      background: var(--rbx-bg-hover);
+      border-color: var(--rbx-text);
     }
-    .rtk-btn-primary:hover { background: #009960; }
+    .rtk-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* High-contrast Roblox Primary Action (White on Dark / Black on Light) */
+    .rtk-btn-cta {
+      background: var(--rbx-cta-bg);
+      border-color: var(--rbx-cta-bg);
+      color: var(--rbx-cta-text);
+    }
+    .rtk-btn-cta:hover {
+      background: var(--rbx-cta-hover);
+      border-color: var(--rbx-cta-hover);
+    }
+
+    /* Roblox Growth Green (Play / Join Server) */
+    .rtk-btn-growth {
+      background: var(--rbx-growth);
+      border-color: var(--rbx-growth);
+      color: #FFFFFF;
+    }
+    .rtk-btn-growth:hover {
+      background: var(--rbx-growth-hover);
+      border-color: var(--rbx-growth-hover);
+    }
+
     .rtk-btn-danger {
-      background: rgba(239, 68, 68, 0.15);
-      border-color: rgba(239, 68, 68, 0.35);
-      color: #fca5a5;
+      border-color: rgba(247, 75, 82, 0.45);
+      color: var(--rbx-danger);
     }
-    .rtk-btn-danger:hover { background: rgba(239, 68, 68, 0.28); }
-    .rtk-btn-sm { height: 27px; padding: 0 9px; font-size: 11px; border-radius: 6px; }
+    .rtk-btn-danger:hover {
+      background: rgba(247, 75, 82, 0.12);
+      border-color: var(--rbx-danger);
+    }
+    .rtk-btn-sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 6px; }
 
     .rtk-alert {
-      padding: 11px 12px;
+      padding: 12px 14px;
       border-radius: 8px;
-      font-size: 12px;
-      background: rgba(245, 158, 11, 0.12);
-      border: 1px solid rgba(245, 158, 11, 0.35);
-      color: #fde68a;
+      font-size: 12.5px;
+      background: var(--rbx-warning-bg);
+      border: 1px solid var(--rbx-warning-border);
+      color: var(--rbx-warning-text);
     }
 
+    /* Hero Action Cards (Ghost Mode / Mute Chat) */
     .rtk-hero-toggle {
-      padding: 12px;
-      border-radius: 9px;
-      border: 1px solid rgba(255,255,255,0.1);
-      background: #16191d;
+      padding: 13px;
+      border-radius: 8px;
+      border: 1px solid var(--rbx-border-strong);
+      background: var(--rbx-bg-surface);
       cursor: pointer;
       text-align: left;
-      color: #f1f5f9;
+      color: var(--rbx-text);
+      font-family: inherit;
       display: flex;
       flex-direction: column;
-      gap: 4px;
-      transition: border-color 0.15s, background 0.15s;
+      gap: 5px;
+      transition: background 0.12s, border-color 0.12s;
     }
-    .rtk-hero-toggle:hover { border-color: rgba(255,255,255,0.24); }
+    .rtk-hero-toggle:hover { background: var(--rbx-bg-elevated); }
     .rtk-hero-toggle.active {
-      background: rgba(0, 176, 111, 0.14);
-      border-color: #00b06f;
+      border-color: var(--rbx-text);
+      background: var(--rbx-bg-elevated);
     }
 
+    /* Roblox Sliding Toggle Switch */
+    .rtk-switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--rbx-border);
+      cursor: pointer;
+    }
+    .rtk-switch-row:last-child { border-bottom: none; }
+    .rtk-toggle {
+      position: relative;
+      width: 40px;
+      height: 22px;
+      flex-shrink: 0;
+    }
+    .rtk-toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+      position: absolute;
+    }
+    .rtk-toggle-track {
+      position: absolute;
+      inset: 0;
+      background: #606162;
+      border-radius: 999px;
+      transition: background 0.16s;
+    }
+    .rtk-toggle-track::after {
+      content: "";
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      left: 2px;
+      top: 2px;
+      background: #FFFFFF;
+      border-radius: 50%;
+      transition: transform 0.16s;
+    }
+    .rtk-toggle input:checked + .rtk-toggle-track {
+      background: var(--rbx-growth);
+    }
+    .rtk-toggle input:checked + .rtk-toggle-track::after {
+      transform: translateX(18px);
+    }
+
+    /* Roblox Settings Row */
+    .rtk-setting-row {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--rbx-border);
+    }
+    .rtk-setting-row:last-child { border-bottom: none; padding-bottom: 0; }
+
+    /* Account & Game List Rows */
     .rtk-acc-item, .rtk-game-item {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 10px;
+      padding: 10px 12px;
       border-radius: 8px;
-      background: #15181c;
-      border: 1px solid rgba(255,255,255,0.07);
+      background: var(--rbx-bg-elevated);
+      border: 1px solid transparent;
     }
-    .rtk-acc-item.current {
-      border-color: rgba(0, 176, 111, 0.55);
-      background: rgba(0, 176, 111, 0.07);
+    .rtk-acc-item.current, .rtk-game-item.current {
+      border-color: var(--rbx-border-strong);
     }
     .rtk-avatar {
-      width: 40px;
-      height: 40px;
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: var(--rbx-bg-canvas);
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+    .rtk-game-thumb {
+      width: 44px;
+      height: 44px;
       border-radius: 8px;
-      background: #262a31;
+      background: var(--rbx-bg-canvas);
       object-fit: cover;
       flex-shrink: 0;
     }
@@ -2041,32 +2301,24 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      padding: 7px 0;
+      border-bottom: 1px solid var(--rbx-border);
       gap: 8px;
     }
     .rtk-kv-row:last-child { border-bottom: none; }
 
     .rtk-code {
-      background: #0f1114;
-      border: 1px solid rgba(255,255,255,0.09);
-      border-radius: 7px;
-      padding: 9px 10px;
+      background: var(--rbx-code-bg);
+      border: 1px solid var(--rbx-border);
+      border-radius: 8px;
+      padding: 10px 12px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11.5px;
-      color: #cbd5e1;
+      font-size: 12px;
+      color: var(--rbx-text);
       overflow-x: auto;
       white-space: pre-wrap;
       word-break: break-all;
       max-height: 240px;
-    }
-
-    .rtk-switch-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      padding: 6px 0;
     }
 
     .rtk-toast-wrap {
@@ -2080,50 +2332,60 @@
       max-width: 380px;
     }
     .rtk-toast {
-      background: #1b1f24;
-      border: 1px solid rgba(255,255,255,0.14);
-      border-left: 4px solid #00b06f;
-      color: #f8fafc;
-      padding: 11px 14px;
+      background: var(--rbx-bg-surface);
+      border: 1px solid var(--rbx-border-strong);
+      color: var(--rbx-text);
+      padding: 12px 14px;
       border-radius: 8px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
-      font-size: 12.5px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+      font-size: 13px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
     }
-    .rtk-toast.error { border-left-color: #ef4444; }
-    .rtk-toast.info { border-left-color: #3b82f6; }
+    .rtk-toast.error { border-left: 3px solid var(--rbx-danger); }
+    .rtk-toast.success { border-left: 3px solid var(--rbx-growth); }
+    .rtk-toast.info { border-left: 3px solid var(--rbx-text); }
 
     .rtk-floating-pill {
       position: fixed;
       bottom: 18px;
       left: 18px;
       z-index: 2147483630;
-      background: #191c20;
-      border: 1px solid rgba(255,255,255,0.16);
-      color: #f1f5f9;
+      background: var(--rbx-bg-surface);
+      border: 1px solid var(--rbx-border-strong);
+      color: var(--rbx-text);
       height: 36px;
       padding: 0 13px;
       border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       gap: 7px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
     }
-    .rtk-floating-pill:hover { border-color: #00b06f; }
+    .rtk-floating-pill:hover { background: var(--rbx-bg-elevated); }
     .rtk-dot-live {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #00d284;
-      box-shadow: 0 0 8px #00d284;
+      background: var(--rbx-growth);
+      flex-shrink: 0;
     }
   `;
+
+  function renderToggleSwitch(id, checked) {
+    return `
+      <span class="rtk-toggle">
+        <input type="checkbox" id="${id}" ${checked ? "checked" : ""} />
+        <span class="rtk-toggle-track"></span>
+      </span>
+    `;
+  }
 
   const HubUI = {
     host: null,
@@ -2135,6 +2397,19 @@
     playtimeSearch: "",
     accSearch: "",
     liveTickInterval: null,
+
+    isPageLightTheme() {
+      return Boolean(
+        document.body?.classList.contains("light-theme") ||
+        document.documentElement?.classList.contains("light-theme") ||
+        document.getElementById("rbx-body")?.classList.contains("light-theme")
+      );
+    },
+
+    syncTheme() {
+      if (!this.host) return;
+      this.host.classList.toggle("theme-light", this.isPageLightTheme());
+    },
 
     init() {
       if (this.host) return;
@@ -2149,34 +2424,45 @@
       const wrapper = document.createElement("div");
       wrapper.innerHTML = `
         <div class="rtk-backdrop" id="rtk-backdrop"></div>
-        <aside class="rtk-drawer" id="rtk-drawer" aria-label="Roblox Multi-Tool">
+        <aside class="rtk-drawer" id="rtk-drawer" aria-label="Roblox Toolkit">
           <div class="rtk-header">
             <div class="rtk-brand">
-              <span>🧰 RoToolkit</span>
+              ${Icons.toolkit}
+              <span>Toolkit</span>
               <span class="rtk-badge">v${APP_VERSION}</span>
             </div>
             <div class="rtk-row">
               <span class="rtk-muted" title="Keyboard Shortcut">Alt+R</span>
-              <button class="rtk-close-btn" id="rtk-close" title="Close">✕</button>
+              <button class="rtk-icon-btn" id="rtk-close" title="Close">${Icons.close}</button>
             </div>
           </div>
           <nav class="rtk-tabs" id="rtk-tabs">
-            <button class="rtk-tab active" data-tab="joiner">🚀 Joiner</button>
-            <button class="rtk-tab" data-tab="accounts">👥 Accounts</button>
-            <button class="rtk-tab" data-tab="settings">⚡ Settings</button>
-            <button class="rtk-tab" data-tab="playtime">⏱️ Playtime</button>
-            <button class="rtk-tab" data-tab="devtools">🛠️ Dev</button>
+            <button class="rtk-tab active" data-tab="joiner">${Icons.server}<span>Servers</span></button>
+            <button class="rtk-tab" data-tab="accounts">${Icons.users}<span>Accounts</span></button>
+            <button class="rtk-tab" data-tab="settings">${Icons.toolkit}<span>Settings</span></button>
+            <button class="rtk-tab" data-tab="playtime">${Icons.clock}<span>Playtime</span></button>
+            <button class="rtk-tab" data-tab="devtools">${Icons.code}<span>Dev</span></button>
           </nav>
           <div class="rtk-body" id="rtk-body"></div>
         </aside>
         <div class="rtk-toast-wrap" id="rtk-toasts"></div>
-        <button class="rtk-floating-pill" id="rtk-pill" title="Open RoToolkit (Alt+R)" style="display:none;">
+        <button class="rtk-floating-pill" id="rtk-pill" title="Open Toolkit (Alt+R)" style="display:none;">
           <span id="rtk-pill-dot" style="display:none;" class="rtk-dot-live"></span>
-          <span>🧰 Toolkit</span>
+          ${Icons.toolkit}
+          <span>Toolkit</span>
         </button>
       `;
       this.shadow.appendChild(wrapper);
       document.documentElement.appendChild(this.host);
+      this.syncTheme();
+
+      // Watch body class changes to sync Roblox Dark/Light theme automatically
+      if (document.body) {
+        new MutationObserver(() => this.syncTheme()).observe(document.body, {
+          attributes: true,
+          attributeFilter: ["class"],
+        });
+      }
 
       this.shadow.getElementById("rtk-backdrop").addEventListener("click", () => this.toggle(false));
       this.shadow.getElementById("rtk-close").addEventListener("click", () => this.toggle(false));
@@ -2198,7 +2484,6 @@
         }
       });
 
-      // Live 1-second ticker for Playtime UI & live indicator dot
       this.liveTickInterval = setInterval(() => this.onSecondTick(), 1000);
     },
 
@@ -2213,7 +2498,7 @@
 
       if (action && action.label && typeof action.onClick === "function") {
         const btn = document.createElement("button");
-        btn.className = "rtk-btn rtk-btn-sm rtk-btn-primary";
+        btn.className = "rtk-btn rtk-btn-sm rtk-btn-cta";
         btn.textContent = action.label;
         btn.addEventListener("click", () => {
           action.onClick();
@@ -2231,6 +2516,7 @@
 
     toggle(forceState) {
       if (!this.shadow) this.init();
+      this.syncTheme();
       this.isOpen = typeof forceState === "boolean" ? forceState : !this.isOpen;
       this.shadow.getElementById("rtk-backdrop").classList.toggle("open", this.isOpen);
       this.shadow.getElementById("rtk-drawer").classList.toggle("open", this.isOpen);
@@ -2262,7 +2548,6 @@
       const pt = PlaytimeTracker.getData();
       const active = pt.activeSession;
 
-      // Update live dot on navbar button & fallback pill
       const navDot = document.getElementById("rtk-navbar-live-dot");
       if (navDot) navDot.style.display = active ? "inline-block" : "none";
       const pillDot = this.shadow?.getElementById("rtk-pill-dot");
@@ -2278,11 +2563,11 @@
 
     buildAccountOptionsHtml(selectedId = "current") {
       const cur = AccountManager.activeUser;
-      const curLabel = cur ? `Current (@${Utils.escapeHtml(cur.name)})` : "Current Session";
+      const curLabel = cur ? `Current (@${Utils.escapeHtml(cur.name)})` : "Current Account";
       let html = `<option value="current" ${selectedId === "current" ? "selected" : ""}>${curLabel}</option>`;
       for (const acc of AccountManager.getList()) {
         if (cur && String(acc.userId) === String(cur.id)) continue;
-        const tag = acc.note ? ` [${Utils.escapeHtml(acc.note)}]` : "";
+        const tag = acc.note ? ` (${Utils.escapeHtml(acc.note)})` : "";
         html += `<option value="${Utils.escapeHtml(acc.userId)}" ${String(selectedId) === String(acc.userId) ? "selected" : ""}>@${Utils.escapeHtml(acc.username)}${tag}</option>`;
       }
       return html;
@@ -2307,59 +2592,59 @@
       body.innerHTML = `
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
-            <span>Direct Job ID & Account Launcher</span>
-            ${pagePlaceId ? `<span class="rtk-badge">Place #${Utils.escapeHtml(pagePlaceId)}</span>` : ""}
+            <span>Direct Server Joiner</span>
+            ${pagePlaceId ? `<span class="rtk-badge">Place ${Utils.escapeHtml(pagePlaceId)}</span>` : ""}
           </div>
           <div class="rtk-col">
-            <label class="rtk-muted">Place ID</label>
+            <label class="rtk-label">Place ID</label>
             <input class="rtk-input" id="j-place" placeholder="e.g. 920587237" value="${Utils.escapeHtml(pagePlaceId)}" />
           </div>
           <div class="rtk-col">
-            <label class="rtk-muted">Server Job ID (Optional — leave blank to join any open server)</label>
-            <input class="rtk-input" id="j-job" placeholder="Paste UUID (e.g. 9134c999-91d5-4b52-9f0a-f7cbae67fe77)..." />
+            <label class="rtk-label">Server Job ID <span class="rtk-muted" style="font-weight:400;">(Optional)</span></label>
+            <input class="rtk-input" id="j-job" placeholder="9134c999-91d5-4b52-9f0a-f7cbae67fe77" />
           </div>
           <div class="rtk-col">
-            <label class="rtk-muted">Join Using Account</label>
+            <label class="rtk-label">Account</label>
             <select class="rtk-select" id="j-account">${this.buildAccountOptionsHtml()}</select>
           </div>
-          <div class="rtk-row" style="margin-top:4px;">
-            <button class="rtk-btn rtk-btn-primary rtk-flex-1" id="j-launch-btn">▶ Launch Roblox</button>
-          </div>
+          <button class="rtk-btn rtk-btn-growth" id="j-launch-btn" style="height:40px;font-size:14px;margin-top:4px;">
+            ${Icons.play}<span>Join Experience</span>
+          </button>
           <div class="rtk-grid-2">
-            <button class="rtk-btn" id="j-smallest-btn">👥 Join Smallest Server</button>
-            <button class="rtk-btn" id="j-ping-btn">⚡ Join Lowest Ping</button>
+            <button class="rtk-btn" id="j-smallest-btn">Smallest Server</button>
+            <button class="rtk-btn" id="j-ping-btn">Lowest Ping</button>
           </div>
         </div>
 
         ${activeSession && activeSession.gameId ? `
           <div class="rtk-card rtk-col">
             <div class="rtk-card-title">
-              <span>🟢 Your Active Server Instance</span>
+              <span class="rtk-row"><span class="rtk-dot-live"></span> Active Server</span>
             </div>
-            <div class="rtk-muted">${Utils.escapeHtml(activeSession.name || "In-Game")} — Job ID:</div>
+            <div class="rtk-muted">${Utils.escapeHtml(activeSession.name || "In-Experience")}</div>
             <div class="rtk-code">${Utils.escapeHtml(activeSession.gameId)}</div>
             <div class="rtk-grid-2">
-              <button class="rtk-btn" id="j-copy-live-job">📋 Copy Live JobId</button>
-              <button class="rtk-btn" id="j-copy-live-link">🔗 Copy Direct Share Link</button>
+              <button class="rtk-btn" id="j-copy-live-job">${Icons.copy}<span>Copy Job ID</span></button>
+              <button class="rtk-btn" id="j-copy-live-link">${Icons.link}<span>Copy Join Link</span></button>
             </div>
           </div>
         ` : ""}
 
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
-            <span>🕒 Recent Joined Servers</span>
+            <span>Recent Servers</span>
             ${recent.length ? `<button class="rtk-btn rtk-btn-sm" id="j-clear-recent">Clear</button>` : ""}
           </div>
           ${recent.length === 0
-            ? `<div class="rtk-muted">Servers you join by Job ID will appear here for 1-click rejoining.</div>`
+            ? `<div class="rtk-muted">Recently joined Job IDs appear here for quick rejoining.</div>`
             : recent.map((item, idx) => `
               <div class="rtk-acc-item" data-recent-idx="${idx}">
                 <div class="rtk-flex-1">
                   <div style="font-weight:600;" class="rtk-ellipsis">${Utils.escapeHtml(item.gameName || `Place ${item.placeId}`)}</div>
-                  <div class="rtk-muted rtk-ellipsis">${Utils.escapeHtml(item.jobId.slice(0, 18))}... • @${Utils.escapeHtml(item.accountName)} • ${Utils.timeAgo(item.joinedAt)}</div>
+                  <div class="rtk-muted rtk-ellipsis">${Utils.escapeHtml(item.jobId.slice(0, 18))}... · @${Utils.escapeHtml(item.accountName)} · ${Utils.timeAgo(item.joinedAt)}</div>
                 </div>
                 <button class="rtk-btn rtk-btn-sm" data-copy-job="${Utils.escapeHtml(item.jobId)}">Copy</button>
-                <button class="rtk-btn rtk-btn-sm rtk-btn-primary" data-rejoin-place="${Utils.escapeHtml(item.placeId)}" data-rejoin-job="${Utils.escapeHtml(item.jobId)}">Rejoin</button>
+                <button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-rejoin-place="${Utils.escapeHtml(item.placeId)}" data-rejoin-job="${Utils.escapeHtml(item.jobId)}">Join</button>
               </div>
             `).join("")}
         </div>
@@ -2375,7 +2660,7 @@
         const { placeId, jobId, accId } = getInputs();
         try {
           await Launcher.join(placeId, jobId || null, accId);
-          this.toast("Launching Roblox client...", "success");
+          this.toast("Launching Roblox...", "success");
         } catch (err) {
           this.toast(err.message, "error");
         }
@@ -2387,7 +2672,7 @@
         e.currentTarget.disabled = true;
         try {
           const s = await Launcher.joinSmallestServer(placeId, accId);
-          this.toast(`Joining smallest server (${s.playing}/${s.maxPlayers} players)...`, "success");
+          this.toast(`Joining smallest server (${s.playing}/${s.maxPlayers})...`, "success");
         } catch (err) {
           this.toast(err.message, "error");
         } finally {
@@ -2411,14 +2696,14 @@
 
       body.querySelector("#j-copy-live-job")?.addEventListener("click", async () => {
         await Utils.copyText(activeSession.gameId);
-        this.toast("Copied live Job ID!", "success");
+        this.toast("Copied active Job ID.", "success");
       });
 
       body.querySelector("#j-copy-live-link")?.addEventListener("click", async () => {
         const pId = activeSession.placeId || activeSession.rootPlaceId || pagePlaceId;
         const link = `https://www.roblox.com/games/${pId}/-?serverJobId=${activeSession.gameId}`;
         await Utils.copyText(link);
-        this.toast("Copied direct share URL!", "success");
+        this.toast("Copied shareable join link.", "success");
       });
 
       body.querySelector("#j-clear-recent")?.addEventListener("click", () => {
@@ -2429,7 +2714,7 @@
       body.querySelectorAll("[data-copy-job]").forEach((btn) => {
         btn.addEventListener("click", async () => {
           await Utils.copyText(btn.dataset.copyJob);
-          this.toast("Job ID copied!", "success");
+          this.toast("Job ID copied.", "success");
         });
       });
 
@@ -2465,71 +2750,80 @@
       body.innerHTML = `
         ${!diag.ok ? `
           <div class="rtk-alert rtk-col">
-            <strong>⚠️ Enable HttpOnly Cookie Access for Real-Time Swapping</strong>
-            <div>Roblox marks <code>.ROBLOSECURITY</code> as <code>HttpOnly</code>. Enable cookie access once in your extension settings:</div>
-            <div>• <b>Violentmonkey</b>: Dashboard → ⚙️ Settings → Advanced → Enable <b>HTTP-Only cookies</b> (and allow in script settings if prompted).</div>
+            <strong>HttpOnly Cookie Access Required for Automatic Switching</strong>
+            <div>Enable <code>HttpOnly</code> cookies once in your userscript extension settings:</div>
+            <div>• <b>Violentmonkey</b>: Dashboard → Settings → Advanced → Enable <b>HTTP-Only cookies</b>.</div>
             <div>• <b>Tampermonkey</b>: Dashboard → Settings → Config Mode: <b>Advanced</b> → Security → Set <b>Allow scripts to access cookies</b> to <b>All</b>.</div>
-            <button class="rtk-btn rtk-btn-sm" id="acc-recheck-btn" style="align-self:flex-start;">🔄 Re-check Permission</button>
+            <button class="rtk-btn rtk-btn-sm" id="acc-recheck-btn" style="align-self:flex-start;">${Icons.refresh}<span>Re-check Access</span></button>
           </div>
         ` : ""}
 
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
-            <span>Active Browser Account</span>
-            <span class="rtk-badge">${cur ? "Logged In" : "Logged Out"}</span>
+            <span>Current Session</span>
+            <span class="rtk-badge ${cur ? "rtk-badge-live" : ""}">${cur ? "Active" : "Signed Out"}</span>
           </div>
           ${cur ? `
             <div class="rtk-acc-item current">
               <img class="rtk-avatar" src="${Utils.escapeHtml(cur.avatarUrl || "https://www.roblox.com/favicon.ico")}" alt="" />
               <div class="rtk-flex-1">
                 <div style="font-weight:700;">${Utils.escapeHtml(cur.displayName)}</div>
-                <div class="rtk-muted">@${Utils.escapeHtml(cur.name)} • ID ${Utils.escapeHtml(cur.id)}</div>
+                <div class="rtk-muted">@${Utils.escapeHtml(cur.name)} · ID ${Utils.escapeHtml(cur.id)}</div>
               </div>
             </div>
-          ` : `<div class="rtk-muted">No active Roblox account in browser. Select an account below or log in.</div>`}
+          ` : `<div class="rtk-muted">Not signed in. Switch to a saved account below or sign in.</div>`}
           <div class="rtk-grid-2">
-            <button class="rtk-btn rtk-btn-primary" id="acc-capture-now">💾 Save Active Cookie</button>
-            <button class="rtk-btn" id="acc-clean-login" title="Backs up current cookie and clears session WITHOUT invalidating token">➕ Clean Login (Add Alt)</button>
+            <button class="rtk-btn rtk-btn-cta" id="acc-capture-now">Save Active Cookie</button>
+            <button class="rtk-btn" id="acc-clean-login" title="Detaches current cookie without invalidating it on Roblox servers">${Icons.plus}<span>Add via Login</span></button>
           </div>
         </div>
 
         <div class="rtk-card rtk-col">
-          <div class="rtk-card-title"><span>Automation & Safety</span></div>
+          <div class="rtk-card-title" style="margin-bottom:4px;"><span>Preferences</span></div>
           <label class="rtk-switch-row">
-            <span><b>Auto-Capture Active Account</b><br/><span class="rtk-muted">Automatically store/refresh cookie of logged-in account</span></span>
-            <input type="checkbox" id="acc-opt-auto" ${settings.autoCaptureAccounts ? "checked" : ""} />
+            <div>
+              <div class="rtk-label">Auto-Save Active Account</div>
+              <div class="rtk-muted">Automatically store cookie of the signed-in account</div>
+            </div>
+            ${renderToggleSwitch("acc-opt-auto", settings.autoCaptureAccounts)}
           </label>
           <label class="rtk-switch-row">
-            <span><b>Native Logout Guard</b><br/><span class="rtk-muted">Warn before Roblox's Log Out invalidates saved cookies</span></span>
-            <input type="checkbox" id="acc-opt-guard" ${settings.logoutGuard ? "checked" : ""} />
+            <div>
+              <div class="rtk-label">Logout Protection</div>
+              <div class="rtk-muted">Prevent Roblox Log Out from invalidating saved cookies</div>
+            </div>
+            ${renderToggleSwitch("acc-opt-guard", settings.logoutGuard)}
           </label>
           <label class="rtk-switch-row">
-            <span><b>Auto-Restore Account After "Join As"</b><br/><span class="rtk-muted">Offer/restore previous browser account after game launches</span></span>
-            <input type="checkbox" id="acc-opt-restore" ${settings.restoreAccountAfterJoin ? "checked" : ""} />
+            <div>
+              <div class="rtk-label">Restore Account After "Join As"</div>
+              <div class="rtk-muted">Switch browser back to previous account after client launches</div>
+            </div>
+            ${renderToggleSwitch("acc-opt-restore", settings.restoreAccountAfterJoin)}
           </label>
         </div>
 
         <div class="rtk-card rtk-col">
-          <div class="rtk-card-title"><span>Add Account Manually (.ROBLOSECURITY)</span></div>
-          <input type="password" class="rtk-input" id="acc-manual-cookie" placeholder="Paste _|WARNING:-DO-NOT-SHARE-THIS...|_ cookie..." autocomplete="off" />
+          <div class="rtk-card-title"><span>Manual Cookie Import</span></div>
+          <input type="password" class="rtk-input" id="acc-manual-cookie" placeholder="Paste .ROBLOSECURITY cookie..." autocomplete="off" />
           <div class="rtk-row">
-            <input type="text" class="rtk-input rtk-flex-1" id="acc-manual-note" placeholder="Optional label (e.g. Main, Alt, Dev)" />
-            <button class="rtk-btn rtk-btn-primary" id="acc-manual-add-btn">Add Account</button>
+            <input type="text" class="rtk-input rtk-flex-1" id="acc-manual-note" placeholder="Label (e.g. Main, Alt, Dev)" />
+            <button class="rtk-btn rtk-btn-cta" id="acc-manual-add-btn">Save</button>
           </div>
         </div>
 
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
-            <span>Stored Accounts (${AccountManager.getList().length})</span>
+            <span>Switch Accounts (${AccountManager.getList().length})</span>
             <div class="rtk-row">
-              <button class="rtk-btn rtk-btn-sm" id="acc-export-btn" title="Export JSON backup">Export</button>
-              <button class="rtk-btn rtk-btn-sm" id="acc-import-btn" title="Import JSON backup">Import</button>
+              <button class="rtk-btn rtk-btn-sm" id="acc-export-btn">Export</button>
+              <button class="rtk-btn rtk-btn-sm" id="acc-import-btn">Import</button>
             </div>
           </div>
-          <input class="rtk-input" id="acc-search" placeholder="Search saved accounts or labels..." value="${Utils.escapeHtml(this.accSearch)}" />
+          <input class="rtk-input" id="acc-search" placeholder="Search accounts..." value="${Utils.escapeHtml(this.accSearch)}" />
           <div class="rtk-col" id="acc-list">
             ${accounts.length === 0
-              ? `<div class="rtk-muted">No accounts stored yet. Enable Auto-Capture or add a cookie above.</div>`
+              ? `<div class="rtk-muted">No saved accounts match.</div>`
               : accounts.map((acc) => {
                   const isCurrent = cur && String(cur.id) === String(acc.userId);
                   return `
@@ -2540,15 +2834,15 @@
                           <strong class="rtk-ellipsis">${Utils.escapeHtml(acc.displayName || acc.username)}</strong>
                           ${acc.note ? `<span class="rtk-badge">${Utils.escapeHtml(acc.note)}</span>` : ""}
                         </div>
-                        <div class="rtk-muted rtk-ellipsis">@${Utils.escapeHtml(acc.username)} • ${acc.addedVia === "manual" ? "Manual" : "Auto"}</div>
+                        <div class="rtk-muted rtk-ellipsis">@${Utils.escapeHtml(acc.username)}</div>
                       </div>
-                      <div class="rtk-row" style="gap:4px;">
+                      <div class="rtk-row" style="gap:5px;">
                         ${isCurrent
-                          ? `<span class="rtk-badge">Active</span>`
-                          : `<button class="rtk-btn rtk-btn-sm rtk-btn-primary" data-acc-switch="${Utils.escapeHtml(acc.userId)}">Switch</button>`}
-                        <button class="rtk-btn rtk-btn-sm" title="Set label" data-acc-note="${Utils.escapeHtml(acc.userId)}">🏷️</button>
-                        <button class="rtk-btn rtk-btn-sm" title="Copy .ROBLOSECURITY" data-acc-copy="${Utils.escapeHtml(acc.userId)}">📋</button>
-                        <button class="rtk-btn rtk-btn-sm rtk-btn-danger" title="Remove from vault" data-acc-del="${Utils.escapeHtml(acc.userId)}">✕</button>
+                          ? `<span class="rtk-badge rtk-badge-live">Current</span>`
+                          : `<button class="rtk-btn rtk-btn-sm rtk-btn-cta" data-acc-switch="${Utils.escapeHtml(acc.userId)}">Switch</button>`}
+                        <button class="rtk-btn rtk-btn-sm" title="Edit Label" data-acc-note="${Utils.escapeHtml(acc.userId)}">${Icons.tag}</button>
+                        <button class="rtk-btn rtk-btn-sm" title="Copy Cookie" data-acc-copy="${Utils.escapeHtml(acc.userId)}">${Icons.copy}</button>
+                        <button class="rtk-btn rtk-btn-sm rtk-btn-danger" title="Remove" data-acc-del="${Utils.escapeHtml(acc.userId)}">✕</button>
                       </div>
                     </div>
                   `;
@@ -2560,13 +2854,13 @@
       body.querySelector("#acc-recheck-btn")?.addEventListener("click", async () => {
         await AccountManager.initAndAutoCapture();
         this.renderAccountsTab(body);
-        this.toast(AccountManager.cookieStatus.ok ? "HttpOnly cookie access active!" : "Still blocked — check extension settings.", AccountManager.cookieStatus.ok ? "success" : "error");
+        this.toast(AccountManager.cookieStatus.ok ? "HttpOnly cookie access verified." : "Still blocked — check extension settings.", AccountManager.cookieStatus.ok ? "success" : "error");
       });
 
       body.querySelector("#acc-capture-now").addEventListener("click", async () => {
         try {
           const saved = await AccountManager.captureCurrentNow();
-          this.toast(`Saved @${saved.username} to vault!`, "success");
+          this.toast(`Saved @${saved.username}.`, "success");
           this.renderAccountsTab(body);
           GamePageUI.refreshAccountSelectors();
         } catch (err) {
@@ -2604,7 +2898,7 @@
           const entry = await AccountManager.addManualCookie(cookieInput.value, noteInput.value);
           cookieInput.value = "";
           noteInput.value = "";
-          this.toast(`Added @${entry.username} to vault!`, "success");
+          this.toast(`Added @${entry.username}.`, "success");
           this.renderAccountsTab(body);
           GamePageUI.refreshAccountSelectors();
         } catch (err) {
@@ -2641,7 +2935,7 @@
         btn.addEventListener("click", () => {
           const uid = btn.dataset.accNote;
           const existing = AccountManager.getAll()[uid]?.note || "";
-          const next = window.prompt("Set a label/tag for this account (e.g. Main, Alt, Trading):", existing);
+          const next = window.prompt("Account label (e.g. Main, Alt, Dev):", existing);
           if (next !== null) {
             AccountManager.updateNote(uid, next);
             this.renderAccountsTab(body);
@@ -2655,7 +2949,7 @@
           const entry = AccountManager.getAll()[btn.dataset.accCopy];
           if (entry?.cookie) {
             await Utils.copyText(entry.cookie);
-            this.toast(`Copied .ROBLOSECURITY for @${entry.username}`, "info");
+            this.toast(`Copied cookie for @${entry.username}.`, "info");
           }
         });
       });
@@ -2664,7 +2958,7 @@
         btn.addEventListener("click", () => {
           const uid = btn.dataset.accDel;
           const entry = AccountManager.getAll()[uid];
-          if (window.confirm(`Remove @${entry?.username || uid} from stored accounts?`)) {
+          if (window.confirm(`Remove @${entry?.username || uid} from saved accounts?`)) {
             AccountManager.removeEntry(uid);
             this.renderAccountsTab(body);
             GamePageUI.refreshAccountSelectors();
@@ -2674,8 +2968,8 @@
 
       body.querySelector("#acc-export-btn").addEventListener("click", () => {
         const json = JSON.stringify(AccountManager.getAll(), null, 2);
-        DevTools.triggerBlobDownload(new TextEncoder().encode(json), `rotoolkit-accounts-${Date.now()}.json`, "application/json");
-        this.toast("Exported accounts vault JSON (keep this file private!).", "info");
+        DevTools.triggerBlobDownload(new TextEncoder().encode(json), `roblox-accounts-backup-${Date.now()}.json`, "application/json");
+        this.toast("Exported accounts JSON backup.", "info");
       });
 
       body.querySelector("#acc-import-btn").addEventListener("click", () => {
@@ -2691,7 +2985,7 @@
             Store.set(STORAGE_KEYS.ACCOUNTS, merged);
             this.renderAccountsTab(body);
             GamePageUI.refreshAccountSelectors();
-            this.toast("Imported accounts into vault!", "success");
+            this.toast("Imported accounts.", "success");
           } catch (err) {
             this.toast("Invalid JSON file: " + err.message, "error");
           }
@@ -2703,16 +2997,16 @@
     /* ---------------- TAB 3: QUICK SETTINGS ---------------- */
     async renderSettingsTab(body) {
       if (!AccountManager.activeUser) {
-        body.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Log into a Roblox account to adjust Quick Settings.</div></div>`;
+        body.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Sign in to adjust privacy and experience settings.</div></div>`;
         return;
       }
 
       if (!QuickSettings.loaded) {
-        body.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Loading live Roblox account settings...</div></div>`;
+        body.innerHTML = `<div class="rtk-card"><div class="rtk-muted">Loading account settings...</div></div>`;
         try {
           await QuickSettings.load();
         } catch (err) {
-          body.innerHTML = `<div class="rtk-alert">Could not fetch settings: ${Utils.escapeHtml(err.message)}</div>`;
+          body.innerHTML = `<div class="rtk-alert">Failed to load settings: ${Utils.escapeHtml(err.message)}</div>`;
           return;
         }
       }
@@ -2723,47 +3017,51 @@
       body.innerHTML = `
         <div class="rtk-grid-2">
           <button class="rtk-hero-toggle ${ghostOn ? "active" : ""}" id="qs-ghost-btn">
-            <div style="font-weight:700;font-size:13.5px;">👻 Appear Offline ${ghostOn ? "• ON" : ""}</div>
-            <div class="rtk-muted">${ghostOn ? "Online status & current game hidden. Click to restore." : "Hide online status & prevent joins in 1 click."}</div>
+            <div class="rtk-row" style="justify-content:space-between;width:100%;">
+              <span class="rtk-row" style="font-weight:700;font-size:13.5px;">${Icons.eyeOff}<span>Appear Offline</span></span>
+              <span class="rtk-badge ${ghostOn ? "rtk-badge-live" : ""}">${ghostOn ? "ON" : "OFF"}</span>
+            </div>
+            <div class="rtk-muted">${ghostOn ? "Status & joins hidden. Click to restore." : "Hide online status & block joins"}</div>
           </button>
           <button class="rtk-hero-toggle ${chatMuted ? "active" : ""}" id="qs-mute-btn">
-            <div style="font-weight:700;font-size:13.5px;">🔇 Mute All Chat ${chatMuted ? "• ON" : ""}</div>
-            <div class="rtk-muted">${chatMuted ? "Experience & App chat disabled. Click to unmute." : "Disable in-game & party chat instantly."}</div>
+            <div class="rtk-row" style="justify-content:space-between;width:100%;">
+              <span class="rtk-row" style="font-weight:700;font-size:13.5px;">${Icons.chatOff}<span>Mute Chat</span></span>
+              <span class="rtk-badge ${chatMuted ? "rtk-badge-live" : ""}">${chatMuted ? "ON" : "OFF"}</span>
+            </div>
+            <div class="rtk-muted">${chatMuted ? "Chat disabled. Click to unmute." : "Disable experience & app chat"}</div>
           </button>
         </div>
 
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
-            <span>1-Click Privacy Presets</span>
-            <button class="rtk-btn rtk-btn-sm" id="qs-refresh-btn">🔄 Sync</button>
+            <span>Quick Presets</span>
+            <button class="rtk-btn rtk-btn-sm" id="qs-refresh-btn">${Icons.refresh}<span>Sync</span></button>
           </div>
           <div class="rtk-row" style="flex-wrap:wrap;">
-            <button class="rtk-btn rtk-btn-sm" data-preset="grinding">🛡️ Solo Grinding</button>
-            <button class="rtk-btn rtk-btn-sm" data-preset="friends">🤝 Friends Only</button>
-            <button class="rtk-btn rtk-btn-sm" data-preset="public">🌐 Public Mode</button>
+            <button class="rtk-btn rtk-btn-sm" data-preset="grinding">Solo Grinding</button>
+            <button class="rtk-btn rtk-btn-sm" data-preset="friends">Friends Only</button>
+            <button class="rtk-btn rtk-btn-sm" data-preset="public">Everyone / Public</button>
           </div>
         </div>
 
         <div class="rtk-card rtk-col">
-          <div class="rtk-card-title"><span>Granular Account & Privacy Controls</span></div>
+          <div class="rtk-card-title" style="margin-bottom:4px;"><span>Privacy & Content Restrictions</span></div>
           ${SETTING_DEFINITIONS.filter((def) => QuickSettings.values[def.key] !== undefined || def.key === "themeType")
             .map((def) => {
               const curVal = QuickSettings.values[def.key] || "";
               const opts = QuickSettings.optionsMap[def.key] || def.fallbackOptions;
               return `
-                <div class="rtk-col" style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
-                  <div class="rtk-row" style="justify-content:space-between;">
-                    <div>
-                      <div style="font-weight:600;">${Utils.escapeHtml(def.label)}</div>
-                      <div class="rtk-muted">${Utils.escapeHtml(def.desc)}</div>
-                    </div>
+                <div class="rtk-setting-row">
+                  <div>
+                    <div class="rtk-label">${Utils.escapeHtml(def.label)}</div>
+                    <div class="rtk-muted">${Utils.escapeHtml(def.desc)}</div>
                   </div>
                   <select class="rtk-select" data-qs-key="${Utils.escapeHtml(def.key)}">
                     ${opts
-                      .map(
-                        (o) =>
-                          `<option value="${Utils.escapeHtml(o)}" ${String(curVal) === String(o) ? "selected" : ""}>${Utils.escapeHtml(QuickSettings.formatOption(o))}</option>`
-                      )
+                      .map((o) => {
+                        const valStr = extractSettingString(o) || String(o);
+                        return `<option value="${Utils.escapeHtml(valStr)}" ${String(curVal) === valStr ? "selected" : ""}>${Utils.escapeHtml(QuickSettings.formatOption(valStr))}</option>`;
+                      })
                       .join("")}
                   </select>
                 </div>
@@ -2777,7 +3075,7 @@
         e.currentTarget.disabled = true;
         try {
           const res = await QuickSettings.toggleGhostMode();
-          this.toast(res.active ? "👻 Ghost Mode enabled (Appearing Offline)" : "🟢 Online visibility restored!", "success");
+          this.toast(res.active ? "Appear Offline enabled." : "Online visibility restored.", "success");
           this.renderSettingsTab(body);
         } catch (err) {
           this.toast(err.message, "error");
@@ -2789,7 +3087,7 @@
         e.currentTarget.disabled = true;
         try {
           const res = await QuickSettings.toggleMuteAllChat();
-          this.toast(res.muted ? "🔇 Chat disabled across Roblox" : "💬 Chat re-enabled!", "success");
+          this.toast(res.muted ? "All chat muted." : "Chat restored.", "success");
           this.renderSettingsTab(body);
         } catch (err) {
           this.toast(err.message, "error");
@@ -2800,7 +3098,7 @@
       body.querySelector("#qs-refresh-btn").addEventListener("click", async () => {
         QuickSettings.loaded = false;
         await this.renderSettingsTab(body);
-        this.toast("Synced latest settings from Roblox.", "info");
+        this.toast("Settings synced.", "info");
       });
 
       body.querySelectorAll("[data-preset]").forEach((btn) => {
@@ -2808,7 +3106,7 @@
           btn.disabled = true;
           try {
             await QuickSettings.applyPreset(btn.dataset.preset);
-            this.toast(`Applied "${btn.textContent.trim()}" preset!`, "success");
+            this.toast(`Applied ${btn.textContent.trim()} preset.`, "success");
             this.renderSettingsTab(body);
           } catch (err) {
             this.toast(err.message, "error");
@@ -2824,7 +3122,7 @@
           sel.disabled = true;
           try {
             await QuickSettings.update({ [key]: val });
-            this.toast(`Updated ${key} → ${QuickSettings.formatOption(val)}`, "success");
+            this.toast(`Saved: ${QuickSettings.formatOption(val)}`, "success");
             this.renderSettingsTab(body);
           } catch (err) {
             this.toast(err.message, "error");
@@ -2846,31 +3144,31 @@
 
       body.innerHTML = `
         ${activeSession ? `
-          <div class="rtk-card rtk-col" style="border-color:rgba(0,176,111,0.5);background:rgba(0,176,111,0.08);">
+          <div class="rtk-card rtk-col" style="border:1px solid var(--rbx-border-strong);">
             <div class="rtk-card-title">
-              <span class="rtk-row"><span class="rtk-dot-live"></span> ${activeSession.presenceType === 3 ? "Currently in Roblox Studio" : "Currently Playing"}</span>
-              <span class="rtk-badge" id="rtk-live-session-timer">${Utils.formatDuration(PlaytimeTracker.getLiveSessionElapsed(activeSession))}</span>
+              <span class="rtk-row"><span class="rtk-dot-live"></span> ${activeSession.presenceType === 3 ? "In Roblox Studio" : "Playing Now"}</span>
+              <span class="rtk-badge rtk-badge-live" id="rtk-live-session-timer">${Utils.formatDuration(PlaytimeTracker.getLiveSessionElapsed(activeSession))}</span>
             </div>
             <div class="rtk-row">
-              ${activeSession.iconUrl ? `<img class="rtk-avatar" src="${Utils.escapeHtml(activeSession.iconUrl)}" alt="" />` : ""}
+              ${activeSession.iconUrl ? `<img class="rtk-game-thumb" src="${Utils.escapeHtml(activeSession.iconUrl)}" alt="" />` : ""}
               <div class="rtk-flex-1">
                 <div style="font-weight:700;">${Utils.escapeHtml(activeSession.name)}</div>
-                <div class="rtk-muted">@${Utils.escapeHtml(activeSession.username || "Current")}${activeSession.gameId ? ` • Server ${Utils.escapeHtml(activeSession.gameId.slice(0, 8))}...` : ""}</div>
+                <div class="rtk-muted">@${Utils.escapeHtml(activeSession.username || "Current")}${activeSession.gameId ? ` · ${Utils.escapeHtml(activeSession.gameId.slice(0, 8))}...` : ""}</div>
               </div>
-              ${activeSession.gameId ? `<button class="rtk-btn rtk-btn-sm" id="pt-copy-job">Copy JobId</button>` : ""}
+              ${activeSession.gameId ? `<button class="rtk-btn rtk-btn-sm" id="pt-copy-job">${Icons.copy}<span>Job ID</span></button>` : ""}
             </div>
           </div>
         ` : `
           <div class="rtk-card">
-            <div class="rtk-muted">🟢 Playtime tracker is active in the background. As soon as your account's online status enters an experience, counting begins automatically!</div>
+            <div class="rtk-muted">Playtime tracking runs automatically whenever your online status enters an experience.</div>
           </div>
         `}
 
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
-            <span>Tracked Playtime (${Utils.formatDuration(totalAcrossAll)})</span>
+            <span>Experiences (${Utils.formatDuration(totalAcrossAll)})</span>
             <div class="rtk-row">
-              <button class="rtk-btn rtk-btn-sm" id="pt-poll-now" title="Check status right now">🔄</button>
+              <button class="rtk-btn rtk-btn-sm" id="pt-poll-now" title="Refresh Presence">${Icons.refresh}</button>
               <button class="rtk-btn rtk-btn-sm" id="pt-export">Export</button>
               <button class="rtk-btn rtk-btn-sm rtk-btn-danger" id="pt-reset">Reset</button>
             </div>
@@ -2886,36 +3184,36 @@
                 .join("")}
             </select>
             <select class="rtk-select" id="pt-sort">
-              <option value="time" ${this.playtimeSort === "time" ? "selected" : ""}>Sort: Most Played</option>
-              <option value="recent" ${this.playtimeSort === "recent" ? "selected" : ""}>Sort: Recently Played</option>
-              <option value="name" ${this.playtimeSort === "name" ? "selected" : ""}>Sort: Name (A–Z)</option>
+              <option value="time" ${this.playtimeSort === "time" ? "selected" : ""}>Most Played</option>
+              <option value="recent" ${this.playtimeSort === "recent" ? "selected" : ""}>Recently Played</option>
+              <option value="name" ${this.playtimeSort === "name" ? "selected" : ""}>Name (A–Z)</option>
             </select>
           </div>
-          <input class="rtk-input" id="pt-search" placeholder="Filter games..." value="${Utils.escapeHtml(this.playtimeSearch)}" />
+          <input class="rtk-input" id="pt-search" placeholder="Search experiences..." value="${Utils.escapeHtml(this.playtimeSearch)}" />
           <label class="rtk-switch-row">
-            <span class="rtk-muted">Also track Roblox Studio sessions</span>
-            <input type="checkbox" id="pt-studio-opt" ${settings.trackStudioTime ? "checked" : ""} />
+            <span class="rtk-muted">Include Roblox Studio time</span>
+            ${renderToggleSwitch("pt-studio-opt", settings.trackStudioTime)}
           </label>
 
           <div class="rtk-col">
             ${list.length === 0
-              ? `<div class="rtk-muted" style="padding:8px 0;">No games recorded yet. Launch any Roblox experience to start tracking!</div>`
+              ? `<div class="rtk-muted" style="padding:8px 0;">No playtime recorded yet.</div>`
               : list
                   .map(
                     (g, i) => `
                     <div class="rtk-game-item ${g.isCurrentlyPlaying ? "current" : ""}">
-                      <div style="font-weight:700;width:20px;text-align:center;color:#64748b;">#${i + 1}</div>
-                      <img class="rtk-avatar" src="${Utils.escapeHtml(g.iconUrl || "https://www.roblox.com/favicon.ico")}" alt="" />
+                      <div style="font-weight:700;width:22px;text-align:center;" class="rtk-muted">${i + 1}</div>
+                      <img class="rtk-game-thumb" src="${Utils.escapeHtml(g.iconUrl || "https://www.roblox.com/favicon.ico")}" alt="" />
                       <div class="rtk-flex-1">
                         <div style="font-weight:700;" class="rtk-ellipsis">${Utils.escapeHtml(g.name)}</div>
                         <div class="rtk-muted">
-                          <b style="color:#e2e8f0;">${Utils.formatDuration(g.computedSeconds)}</b>
-                          • ${g.sessions || 1} session${(g.sessions || 1) === 1 ? "" : "s"}
-                          • ${Utils.timeAgo(g.lastPlayedAt)}
+                          <strong style="color:var(--rbx-text);">${Utils.formatDuration(g.computedSeconds)}</strong>
+                          · ${g.sessions || 1} session${(g.sessions || 1) === 1 ? "" : "s"}
+                          · ${Utils.timeAgo(g.lastPlayedAt)}
                         </div>
                       </div>
                       ${g.rootPlaceId || g.placeId
-                        ? `<button class="rtk-btn rtk-btn-sm rtk-btn-primary" data-pt-play="${Utils.escapeHtml(g.rootPlaceId || g.placeId)}">▶ Play</button>`
+                        ? `<button class="rtk-btn rtk-btn-sm rtk-btn-growth" data-pt-play="${Utils.escapeHtml(g.rootPlaceId || g.placeId)}">${Icons.play}</button>`
                         : ""}
                     </div>
                   `
@@ -2927,13 +3225,13 @@
 
       body.querySelector("#pt-copy-job")?.addEventListener("click", async () => {
         await Utils.copyText(activeSession.gameId);
-        this.toast("Copied active Job ID!", "success");
+        this.toast("Copied active Job ID.", "success");
       });
 
       body.querySelector("#pt-poll-now").addEventListener("click", async () => {
         await PlaytimeTracker.poll();
         this.renderPlaytimeTab(body);
-        this.toast("Presence checked!", "info");
+        this.toast("Presence updated.", "info");
       });
 
       body.querySelector("#pt-acc-filter").addEventListener("change", (e) => {
@@ -2963,7 +3261,7 @@
 
       body.querySelector("#pt-export").addEventListener("click", () => {
         const json = JSON.stringify(PlaytimeTracker.getData(), null, 2);
-        DevTools.triggerBlobDownload(new TextEncoder().encode(json), `rotoolkit-playtime-${Date.now()}.json`, "application/json");
+        DevTools.triggerBlobDownload(new TextEncoder().encode(json), `roblox-playtime-${Date.now()}.json`, "application/json");
       });
 
       body.querySelector("#pt-reset").addEventListener("click", () => {
@@ -2994,33 +3292,33 @@
       body.innerHTML = `
         <div class="rtk-card rtk-col">
           <div class="rtk-card-title">
-            <span>🔍 Live Page & Experience Inspector</span>
+            <span>Page & Experience Inspector</span>
             <span class="rtk-badge">${Utils.escapeHtml(ctx.type.toUpperCase())}</span>
           </div>
           <div id="dt-inspector-rows" class="rtk-col">
-            <div class="rtk-muted">Inspecting page metadata...</div>
+            <div class="rtk-muted">Loading metadata...</div>
           </div>
         </div>
 
         <div class="rtk-card rtk-col">
-          <div class="rtk-card-title"><span>🖼️ Decal / Clothing → Image ID & Raw Asset Extractor</span></div>
-          <div class="rtk-muted">Extract true Studio <code>ImageLabel</code> / Template IDs from Decals, Shirts, Pants, or Models, or download raw <code>.rbxm</code> / <code>.png</code> / <code>.ogg</code> files.</div>
+          <div class="rtk-card-title"><span>Asset & Image ID Extractor</span></div>
+          <div class="rtk-muted">Resolve underlying <code>ImageLabel</code> / Template IDs from Decals, Shirts, Pants, or Models, and download raw asset files.</div>
           <div class="rtk-row">
-            <input class="rtk-input rtk-flex-1" id="dt-asset-id" placeholder="Enter Asset ID (e.g. Decal, Shirt, Audio, Model)" value="${Utils.escapeHtml(prefillAsset)}" />
-            <button class="rtk-btn rtk-btn-primary" id="dt-inspect-asset-btn">Inspect</button>
+            <input class="rtk-input rtk-flex-1" id="dt-asset-id" placeholder="Asset ID (Decal, Clothing, Audio, Model)" value="${Utils.escapeHtml(prefillAsset)}" />
+            <button class="rtk-btn rtk-btn-cta" id="dt-inspect-asset-btn">Inspect</button>
           </div>
           <div id="dt-asset-result"></div>
         </div>
 
         <div class="rtk-card rtk-col">
-          <div class="rtk-card-title"><span>📜 Context Luau Snippets</span></div>
+          <div class="rtk-card-title"><span>Luau Snippets</span></div>
           ${snippets
             .map(
               (s, i) => `
               <div class="rtk-col">
                 <div class="rtk-row" style="justify-content:space-between;">
                   <span class="rtk-muted">${Utils.escapeHtml(s.title)}</span>
-                  <button class="rtk-btn rtk-btn-sm" data-snip-idx="${i}">Copy Luau</button>
+                  <button class="rtk-btn rtk-btn-sm" data-snip-idx="${i}">${Icons.copy}<span>Copy</span></button>
                 </div>
                 <div class="rtk-code">${Utils.escapeHtml(s.code)}</div>
               </div>
@@ -3030,17 +3328,17 @@
         </div>
 
         <div class="rtk-card rtk-col">
-          <div class="rtk-card-title"><span>🧪 Authenticated Roblox API Console (Auto-CSRF)</span></div>
+          <div class="rtk-card-title"><span>API Console (Auto-CSRF)</span></div>
           <select class="rtk-select" id="dt-api-preset">
-            <option value="">— Quick Endpoint Templates —</option>
-            <option value="GET|https://users.roblox.com/v1/users/authenticated|">GET Current Authenticated User</option>
-            <option value="POST|https://presence.roblox.com/v1/presence/users|${Utils.escapeHtml(JSON.stringify({ userIds: [AccountManager.activeUser?.id || 1] }))}">POST My Presence & Live JobId</option>
-            <option value="GET|https://apis.roblox.com/user-settings-api/v1/user-settings|">GET User Privacy Settings</option>
+            <option value="">Select Endpoint Template...</option>
+            <option value="GET|https://users.roblox.com/v1/users/authenticated|">GET Authenticated User</option>
+            <option value="POST|https://presence.roblox.com/v1/presence/users|${Utils.escapeHtml(JSON.stringify({ userIds: [AccountManager.activeUser?.id || 1] }))}">POST Presence & Active Job ID</option>
+            <option value="GET|https://apis.roblox.com/user-settings-api/v1/user-settings|">GET User Settings</option>
             ${ctx.type === "game" && ctx.id ? `<option value="GET|https://games.roblox.com/v1/games/${ctx.id}/servers/Public?limit=10|">GET Public Servers (Current Place)</option>` : ""}
-            <option value="GET|https://economy.roblox.com/v1/users/${AccountManager.activeUser?.id || 1}/currency|">GET Current Account Robux Balance</option>
+            <option value="GET|https://economy.roblox.com/v1/users/${AccountManager.activeUser?.id || 1}/currency|">GET Robux Balance</option>
           </select>
           <div class="rtk-row">
-            <select class="rtk-select" id="dt-api-method" style="width:95px;">
+            <select class="rtk-select" id="dt-api-method" style="width:100px;">
               <option>GET</option>
               <option>POST</option>
               <option>PATCH</option>
@@ -3048,17 +3346,16 @@
             </select>
             <input class="rtk-input rtk-flex-1" id="dt-api-url" placeholder="https://users.roblox.com/v1/users/authenticated" value="https://users.roblox.com/v1/users/authenticated" />
           </div>
-          <textarea class="rtk-textarea" id="dt-api-body" placeholder='Optional JSON body for POST/PATCH, e.g. {"userIds":[1]}'></textarea>
+          <textarea class="rtk-textarea" id="dt-api-body" placeholder='Optional JSON body, e.g. {"userIds":[1]}'></textarea>
           <div class="rtk-row">
-            <button class="rtk-btn rtk-btn-primary rtk-flex-1" id="dt-api-send">▶ Send Request</button>
-            <button class="rtk-btn rtk-btn-sm" id="dt-api-copy-fetch">Copy fetch()</button>
-            <button class="rtk-btn rtk-btn-sm" id="dt-api-copy-luau">Copy HttpService</button>
+            <button class="rtk-btn rtk-btn-cta rtk-flex-1" id="dt-api-send">Send Request</button>
+            <button class="rtk-btn rtk-btn-sm" id="dt-api-copy-fetch">fetch()</button>
+            <button class="rtk-btn rtk-btn-sm" id="dt-api-copy-luau">HttpService</button>
           </div>
           <div id="dt-api-output"></div>
         </div>
       `;
 
-      // Populate live page inspector asynchronously
       DevTools.inspectCurrentPage().then((info) => {
         const container = body.querySelector("#dt-inspector-rows");
         if (!container) return;
@@ -3068,8 +3365,8 @@
             <div class="rtk-kv-row">
               <span class="rtk-muted">${Utils.escapeHtml(f.label)}</span>
               <div class="rtk-row">
-                <code style="color:#f8fafc;">${Utils.escapeHtml(f.value)}</code>
-                ${f.copy ? `<button class="rtk-btn rtk-btn-sm" data-dt-copy="${Utils.escapeHtml(f.copyVal || f.value)}">Copy</button>` : ""}
+                <code>${Utils.escapeHtml(f.value)}</code>
+                ${f.copy ? `<button class="rtk-btn rtk-btn-sm" data-dt-copy="${Utils.escapeHtml(f.copyVal || f.value)}">${Icons.copy}</button>` : ""}
               </div>
             </div>
           `
@@ -3079,10 +3376,10 @@
         if (info.liveJobId) {
           html += `
             <div class="rtk-kv-row">
-              <span class="rtk-muted">🟢 Active Server JobId</span>
+              <span class="rtk-muted">Active Job ID</span>
               <div class="rtk-row">
-                <code style="color:#34d399;">${Utils.escapeHtml(info.liveJobId.slice(0, 13))}...</code>
-                <button class="rtk-btn rtk-btn-sm" data-dt-copy="${Utils.escapeHtml(info.liveJobId)}">Copy</button>
+                <code style="color:var(--rbx-growth);">${Utils.escapeHtml(info.liveJobId.slice(0, 13))}...</code>
+                <button class="rtk-btn rtk-btn-sm" data-dt-copy="${Utils.escapeHtml(info.liveJobId)}">${Icons.copy}</button>
               </div>
             </div>
           `;
@@ -3090,11 +3387,11 @@
         if (info.contextType === "game" && info.primaryId) {
           html += `
             <div class="rtk-row" style="margin-top:6px;">
-              <button class="rtk-btn rtk-flex-1" id="dt-open-studio" data-place="${Utils.escapeHtml(info.primaryId)}" data-univ="${Utils.escapeHtml(info.gameMeta?.id || "")}">🛠️ Open Place in Roblox Studio</button>
+              <button class="rtk-btn rtk-flex-1" id="dt-open-studio" data-place="${Utils.escapeHtml(info.primaryId)}" data-univ="${Utils.escapeHtml(info.gameMeta?.id || "")}">Open in Roblox Studio</button>
             </div>
           `;
         }
-        container.innerHTML = html || `<div class="rtk-muted">Navigate to a Game, Asset, User, or Group page to inspect IDs.</div>`;
+        container.innerHTML = html || `<div class="rtk-muted">Open a Game, Catalog item, User, or Group page to inspect metadata.</div>`;
 
         container.querySelectorAll("[data-dt-copy]").forEach((btn) => {
           btn.addEventListener("click", async () => {
@@ -3105,13 +3402,11 @@
 
         container.querySelector("#dt-open-studio")?.addEventListener("click", (e) => {
           const ok = Launcher.openInStudio(e.currentTarget.dataset.place, e.currentTarget.dataset.univ);
-          if (ok) this.toast("Launching Roblox Studio...", "info");
-          else this.toast("Roblox.GameLauncher.editGameInStudio unavailable on this page.", "error");
+          if (ok) this.toast("Opening Roblox Studio...", "info");
+          else this.toast("Studio launcher unavailable on this page.", "error");
         });
       });
 
-      // Asset Inspector & Raw Downloader
-      let lastAssetData = null;
       body.querySelector("#dt-inspect-asset-btn").addEventListener("click", async (e) => {
         const idVal = body.querySelector("#dt-asset-id").value.trim();
         const out = body.querySelector("#dt-asset-result");
@@ -3119,32 +3414,31 @@
         out.innerHTML = `<div class="rtk-muted">Fetching asset stream...</div>`;
         try {
           const data = await DevTools.inspectAssetAndExtractIds(idVal);
-          lastAssetData = data;
           out.innerHTML = `
-            <div class="rtk-col" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);">
+            <div class="rtk-col" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--rbx-border);">
               <div class="rtk-kv-row"><span class="rtk-muted">Name</span><b>${Utils.escapeHtml(data.name)}</b></div>
-              <div class="rtk-kv-row"><span class="rtk-muted">Detected Format</span><span>${Utils.escapeHtml(data.format.kind)} (${(data.byteSize / 1024).toFixed(1)} KB)</span></div>
+              <div class="rtk-kv-row"><span class="rtk-muted">Format</span><span>${Utils.escapeHtml(data.format.kind)} (${(data.byteSize / 1024).toFixed(1)} KB)</span></div>
               <div class="rtk-row" style="flex-wrap:wrap;">
-                <button class="rtk-btn rtk-btn-sm rtk-btn-primary" id="dt-dl-raw">⬇️ Download .${Utils.escapeHtml(data.format.ext)}</button>
-                <button class="rtk-btn rtk-btn-sm" data-dt-uri="rbxassetid://${Utils.escapeHtml(data.assetId)}">Copy rbxassetid://</button>
-                <button class="rtk-btn rtk-btn-sm" data-dt-uri="rbxthumb://type=Asset&id=${Utils.escapeHtml(data.assetId)}&w=420&h=420">Copy rbxthumb://</button>
+                <button class="rtk-btn rtk-btn-sm rtk-btn-cta" id="dt-dl-raw">${Icons.download}<span>Download .${Utils.escapeHtml(data.format.ext)}</span></button>
+                <button class="rtk-btn rtk-btn-sm" data-dt-uri="rbxassetid://${Utils.escapeHtml(data.assetId)}">rbxassetid://</button>
+                <button class="rtk-btn rtk-btn-sm" data-dt-uri="rbxthumb://type=Asset&id=${Utils.escapeHtml(data.assetId)}&w=420&h=420">rbxthumb://</button>
               </div>
               ${data.extractedIds.length > 0 ? `
-                <div class="rtk-muted" style="margin-top:4px;">Underlying Referenced Asset / Image IDs (${data.extractedIds.length}):</div>
+                <div class="rtk-muted" style="margin-top:4px;">Referenced Asset / Image IDs (${data.extractedIds.length}):</div>
                 ${data.extractedIds
                   .map(
                     (eid) => `
                   <div class="rtk-kv-row">
                     <code>rbxassetid://${Utils.escapeHtml(eid)}</code>
                     <div class="rtk-row">
-                      <button class="rtk-btn rtk-btn-sm" data-dt-uri="${Utils.escapeHtml(eid)}">Copy ID</button>
-                      <button class="rtk-btn rtk-btn-sm" data-dt-uri="rbxassetid://${Utils.escapeHtml(eid)}">Copy URI</button>
+                      <button class="rtk-btn rtk-btn-sm" data-dt-uri="${Utils.escapeHtml(eid)}">ID</button>
+                      <button class="rtk-btn rtk-btn-sm" data-dt-uri="rbxassetid://${Utils.escapeHtml(eid)}">URI</button>
                     </div>
                   </div>
                 `
                   )
                   .join("")}
-              ` : `<div class="rtk-muted">Direct binary asset (no nested XML IDs — use Download button above).</div>`}
+              ` : `<div class="rtk-muted">Direct binary asset — click Download above to save file.</div>`}
             </div>
           `;
 
@@ -3165,18 +3459,16 @@
         }
       });
 
-      // Luau snippets copy
       body.querySelectorAll("[data-snip-idx]").forEach((btn) => {
         btn.addEventListener("click", async () => {
           const snip = snippets[Number(btn.dataset.snipIdx)];
           if (snip) {
             await Utils.copyText(snip.code);
-            this.toast("Copied Luau snippet!", "success");
+            this.toast("Copied Luau snippet.", "success");
           }
         });
       });
 
-      // API Playground
       body.querySelector("#dt-api-preset").addEventListener("change", (e) => {
         if (!e.target.value) return;
         const [m, u, ...rest] = e.target.value.split("|");
@@ -3200,14 +3492,14 @@
           const formatted = typeof res.data === "object" ? JSON.stringify(res.data, null, 2) : String(res.text || "");
           out.innerHTML = `
             <div class="rtk-row" style="justify-content:space-between;margin-bottom:6px;">
-              <span class="rtk-badge" style="${res.ok ? "" : "background:rgba(239,68,68,0.2);color:#fca5a5;border-color:rgba(239,68,68,0.4);"}">HTTP ${res.status} • ${res.durationMs} ms</span>
-              <button class="rtk-btn rtk-btn-sm" id="dt-copy-resp">Copy Response</button>
+              <span class="rtk-badge ${res.ok ? "rtk-badge-live" : ""}">HTTP ${res.status} · ${res.durationMs} ms</span>
+              <button class="rtk-btn rtk-btn-sm" id="dt-copy-resp">${Icons.copy}<span>Copy</span></button>
             </div>
             <div class="rtk-code">${Utils.escapeHtml(formatted)}</div>
           `;
           out.querySelector("#dt-copy-resp")?.addEventListener("click", async () => {
             await Utils.copyText(formatted);
-            this.toast("Copied JSON response!", "success");
+            this.toast("Copied response.", "success");
           });
         } catch (err) {
           out.innerHTML = `<div class="rtk-alert">${Utils.escapeHtml(err.message)}</div>`;
@@ -3223,7 +3515,7 @@
           body.querySelector("#dt-api-body").value
         );
         await Utils.copyText(fetchCode);
-        this.toast("Copied JavaScript fetch() snippet!", "success");
+        this.toast("Copied fetch() snippet.", "success");
       });
 
       body.querySelector("#dt-api-copy-luau").addEventListener("click", async () => {
@@ -3233,13 +3525,13 @@
           body.querySelector("#dt-api-body").value
         );
         await Utils.copyText(luauCode);
-        this.toast("Copied Luau HttpService snippet!", "success");
+        this.toast("Copied HttpService snippet.", "success");
       });
     },
   };
 
   /* ============================================================================
-   * 11. IN-PAGE GAME CONTROLS, NAVBAR BUTTON, LOGOUT GUARD & BOOTSTRAP
+   * 11. IN-PAGE ROBLOX-NATIVE CONTROLS, NAVBAR ICON, LOGOUT GUARD & BOOTSTRAP
    * ============================================================================ */
   const INPAGE_STYLES_ID = "rtk-inpage-styles";
 
@@ -3251,63 +3543,71 @@
       #rtk-navbar-item {
         display: inline-flex;
         align-items: center;
-        margin-right: 6px;
+        vertical-align: middle;
+        margin: 0 2px;
       }
       #rtk-navbar-btn {
-        height: 32px;
-        padding: 0 11px;
-        border-radius: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.16);
-        background: rgba(0, 176, 111, 0.14);
+        position: relative;
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        border-radius: 50%;
+        border: none;
+        background: transparent;
         color: inherit;
-        font-size: 12.5px;
-        font-weight: 700;
         cursor: pointer;
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        transition: background 0.15s, border-color 0.15s;
+        justify-content: center;
+        transition: background-color 0.12s ease;
       }
       #rtk-navbar-btn:hover {
-        background: rgba(0, 176, 111, 0.26);
-        border-color: #00b06f;
+        background-color: rgba(255, 255, 255, 0.1);
+      }
+      .light-theme #rtk-navbar-btn:hover,
+      body.light-theme #rtk-navbar-btn:hover {
+        background-color: rgba(0, 0, 0, 0.06);
       }
       #rtk-navbar-live-dot {
+        position: absolute;
+        top: 6px;
+        right: 6px;
         width: 7px;
         height: 7px;
         border-radius: 50%;
-        background: #00d284;
-        box-shadow: 0 0 6px #00d284;
+        background: #00B06F;
         display: none;
       }
 
+      /* Matches Roblox .section-content inside #game-instances */
       #roblox-jobid-joiner-container {
-        background-color: var(--card-bg, rgba(25, 27, 29, 0.72));
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 10px;
-        padding: 16px 18px;
-        margin: 14px 0 18px 0;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
-        color: inherit;
+        background-color: #232527;
+        border-radius: 8px;
+        padding: 16px;
+        margin: 12px 0 18px 0;
+        font-family: "Builder Sans", "HCo Gotham SSm", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        color: #FFFFFF;
       }
-      .theme-light #roblox-jobid-joiner-container,
+      .light-theme #roblox-jobid-joiner-container,
       body.light-theme #roblox-jobid-joiner-container {
-        background-color: #ffffff;
-        border: 1px solid rgba(0, 0, 0, 0.12);
+        background-color: #FFFFFF;
+        color: #191B1D;
+        border: 1px solid rgba(0, 0, 0, 0.08);
       }
       .rtk-srv-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-bottom: 10px;
+        margin-bottom: 12px;
         gap: 8px;
       }
       .rtk-srv-title {
-        font-size: 15px;
+        font-size: 16px;
         font-weight: 700;
         display: flex;
         align-items: center;
         gap: 8px;
+        margin: 0;
       }
       .rtk-srv-row {
         display: flex;
@@ -3318,69 +3618,114 @@
       .rtk-srv-input {
         flex: 1 1 240px;
         height: 38px;
-        padding: 6px 12px;
-        font-size: 13.5px;
-        border-radius: 7px;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        background: rgba(0, 0, 0, 0.26);
-        color: inherit;
+        padding: 0 12px;
+        font-size: 14px;
+        font-family: inherit;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        background-color: #191B1D;
+        color: #FFFFFF;
         outline: none;
+        transition: border-color 0.12s ease;
       }
-      .theme-light .rtk-srv-input,
+      .light-theme .rtk-srv-input,
       body.light-theme .rtk-srv-input {
-        background: #f5f6f7;
-        border-color: rgba(0, 0, 0, 0.2);
-        color: #191b1d;
+        background-color: #F2F4F5;
+        border-color: rgba(0, 0, 0, 0.22);
+        color: #191B1D;
       }
       .rtk-srv-input:focus {
-        border-color: #00b06f;
-        box-shadow: 0 0 0 2px rgba(0, 176, 111, 0.25);
+        border-color: #FFFFFF;
       }
+      .light-theme .rtk-srv-input:focus,
+      body.light-theme .rtk-srv-input:focus {
+        border-color: #191B1D;
+      }
+
       .rtk-srv-select {
         height: 38px;
-        padding: 0 10px;
-        font-size: 13px;
-        border-radius: 7px;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        background: #1b1e22;
-        color: #f1f5f9;
+        padding: 0 32px 0 12px;
+        font-size: 13.5px;
+        font-family: inherit;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        background-color: #191B1D;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23BDBEBE' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
+        appearance: none;
+        -webkit-appearance: none;
+        color: #FFFFFF;
         outline: none;
         max-width: 210px;
+        cursor: pointer;
       }
-      .theme-light .rtk-srv-select,
+      .rtk-srv-select option {
+        background-color: #232527;
+        color: #FFFFFF;
+      }
+      .light-theme .rtk-srv-select,
       body.light-theme .rtk-srv-select {
-        background: #f5f6f7;
-        border-color: rgba(0, 0, 0, 0.2);
-        color: #191b1d;
+        background-color: #F2F4F5;
+        border-color: rgba(0, 0, 0, 0.22);
+        color: #191B1D;
       }
+      .light-theme .rtk-srv-select option,
+      body.light-theme .rtk-srv-select option {
+        background-color: #FFFFFF;
+        color: #191B1D;
+      }
+
       .rtk-srv-join-btn {
         height: 38px;
-        padding: 0 18px;
-        border-radius: 7px;
+        padding: 0 20px;
+        border-radius: 8px;
         border: none;
-        background: #00b06f;
-        color: #ffffff;
-        font-size: 13.5px;
+        background-color: #00B06F;
+        color: #FFFFFF;
+        font-size: 14px;
         font-weight: 700;
+        font-family: inherit;
         cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
         white-space: nowrap;
+        transition: background-color 0.12s ease;
       }
-      .rtk-srv-join-btn:hover { background: #009960; }
+      .rtk-srv-join-btn:hover { background-color: #009E63; }
+
+      /* Matches Roblox .btn-control-sm */
       .rtk-srv-chip {
-        height: 28px;
-        padding: 0 10px;
-        border-radius: 6px;
-        border: 1px solid rgba(255, 255, 255, 0.14);
-        background: rgba(255, 255, 255, 0.06);
+        height: 30px;
+        padding: 0 11px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        background: transparent;
         color: inherit;
-        font-size: 12px;
+        font-size: 12.5px;
         font-weight: 600;
+        font-family: inherit;
         cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        transition: background-color 0.12s ease, border-color 0.12s ease;
       }
       .rtk-srv-chip:hover {
-        background: rgba(255, 255, 255, 0.14);
-        border-color: rgba(255, 255, 255, 0.28);
+        background-color: rgba(255, 255, 255, 0.08);
+        border-color: rgba(255, 255, 255, 0.45);
       }
+      .light-theme .rtk-srv-chip,
+      body.light-theme .rtk-srv-chip {
+        border-color: rgba(0, 0, 0, 0.22);
+      }
+      .light-theme .rtk-srv-chip:hover,
+      body.light-theme .rtk-srv-chip:hover {
+        background-color: rgba(0, 0, 0, 0.05);
+        border-color: rgba(0, 0, 0, 0.45);
+      }
+
       #roblox-jobid-status {
         margin-top: 8px;
         font-size: 12.5px;
@@ -3396,7 +3741,7 @@
       .rtk-card-tools {
         display: flex;
         gap: 6px;
-        margin-top: 6px;
+        margin-top: 8px;
         flex-wrap: wrap;
       }
     `;
@@ -3416,6 +3761,7 @@
       }
 
       const navRight =
+        document.querySelector("ul.navbar-right.rbx-navbar-icon-group") ||
         document.querySelector("ul.navbar-right") ||
         document.querySelector(".rbx-navbar-right") ||
         document.querySelector("#header .navbar-right");
@@ -3423,21 +3769,23 @@
       if (navRight) {
         const li = document.createElement("li");
         li.id = "rtk-navbar-item";
+        li.className = "rbx-navbar-right-item";
         li.innerHTML = `
-          <button type="button" id="rtk-navbar-btn" title="Open RoToolkit (Alt+R)">
+          <button type="button" id="rtk-navbar-btn" title="Toolkit (Alt+R)" aria-label="Open Toolkit">
+            ${Icons.toolkit}
             <span id="rtk-navbar-live-dot"></span>
-            <span>🧰 Toolkit</span>
           </button>
         `;
         li.querySelector("#rtk-navbar-btn").addEventListener("click", () => HubUI.toggle());
         navRight.insertBefore(li, navRight.firstChild);
-        if (pill) pill.style.display = "none";
+        const isVisible = li.offsetParent !== null;
+        if (pill) pill.style.display = isVisible ? "none" : "inline-flex";
       } else if (pill) {
         pill.style.display = "inline-flex";
       }
     },
 
-    showServerBarStatus(msg, color = "#10b981") {
+    showServerBarStatus(msg, color = "#00B06F") {
       const el = document.getElementById("roblox-jobid-status");
       if (!el) return;
       el.textContent = msg;
@@ -3472,30 +3820,28 @@
       box.id = "roblox-jobid-joiner-container";
       box.innerHTML = `
         <div class="rtk-srv-header">
-          <div class="rtk-srv-title">
-            <span>🚀 Join Server by Job ID</span>
-          </div>
-          <button type="button" class="rtk-srv-chip" id="rtk-srv-open-hub">🧰 Full Toolkit (Alt+R)</button>
+          <h3 class="rtk-srv-title">${Icons.server}<span>Join Server by Job ID</span></h3>
+          <button type="button" class="rtk-srv-chip" id="rtk-srv-open-hub">${Icons.toolkit}<span>Toolkit (Alt+R)</span></button>
         </div>
         <div class="rtk-srv-row">
           <input
             type="text"
             id="roblox-jobid-input"
             class="rtk-srv-input"
-            placeholder="Paste Server Job ID (e.g. 9134c999-91d5-4b52-9f0a-f7cbae67fe77)..."
+            placeholder="Server Job ID (e.g. 9134c999-91d5-4b52-9f0a-f7cbae67fe77)"
             autocomplete="off"
             spellcheck="false"
           />
-          <select id="rtk-srv-account" class="rtk-srv-select rtk-account-dropdown" title="Choose account to join with">
+          <select id="rtk-srv-account" class="rtk-srv-select rtk-account-dropdown" title="Account to join with">
             ${HubUI.buildAccountOptionsHtml()}
           </select>
-          <button type="button" id="roblox-jobid-join-btn" class="rtk-srv-join-btn">Join Server</button>
+          <button type="button" id="roblox-jobid-join-btn" class="rtk-srv-join-btn">Join</button>
         </div>
         <div class="rtk-srv-row" style="margin-top:10px;">
-          <button type="button" class="rtk-srv-chip" id="rtk-srv-smallest">👥 Join Smallest Server</button>
-          <button type="button" class="rtk-srv-chip" id="rtk-srv-ping">⚡ Join Lowest Ping</button>
-          <button type="button" class="rtk-srv-chip" id="rtk-srv-copy-live">📋 Copy My Active JobId</button>
-          <button type="button" class="rtk-srv-chip" id="rtk-srv-manage-acc">👥 Manage Accounts</button>
+          <button type="button" class="rtk-srv-chip" id="rtk-srv-smallest">Smallest Server</button>
+          <button type="button" class="rtk-srv-chip" id="rtk-srv-ping">Lowest Ping</button>
+          <button type="button" class="rtk-srv-chip" id="rtk-srv-copy-live">${Icons.copy}<span>Copy Active Job ID</span></button>
+          <button type="button" class="rtk-srv-chip" id="rtk-srv-manage-acc">${Icons.users}<span>Accounts</span></button>
         </div>
         <div id="roblox-jobid-status"></div>
       `;
@@ -3509,14 +3855,14 @@
         const placeId = Utils.getPlaceIdFromPage();
         const rawJob = input.value.trim();
         if (!rawJob) {
-          this.showServerBarStatus("Please paste a valid Server Job ID.", "#ef4444");
+          this.showServerBarStatus("Enter a valid Server Job ID.", "#F74B52");
           return;
         }
         try {
-          this.showServerBarStatus("Launching Roblox client...", "#10b981");
+          this.showServerBarStatus("Launching Roblox...", "#00B06F");
           await Launcher.join(placeId, rawJob, accSelect.value);
         } catch (err) {
-          this.showServerBarStatus(err.message, "#ef4444");
+          this.showServerBarStatus(err.message, "#F74B52");
         }
       };
 
@@ -3530,21 +3876,21 @@
 
       box.querySelector("#rtk-srv-smallest").addEventListener("click", async () => {
         try {
-          this.showServerBarStatus("Scanning for smallest public server...", "#3b82f6");
+          this.showServerBarStatus("Finding smallest server...", "#BDBEBE");
           const s = await Launcher.joinSmallestServer(Utils.getPlaceIdFromPage(), accSelect.value);
-          this.showServerBarStatus(`Joining server (${s.playing}/${s.maxPlayers} players)...`, "#10b981");
+          this.showServerBarStatus(`Joining server (${s.playing}/${s.maxPlayers} players)...`, "#00B06F");
         } catch (err) {
-          this.showServerBarStatus(err.message, "#ef4444");
+          this.showServerBarStatus(err.message, "#F74B52");
         }
       });
 
       box.querySelector("#rtk-srv-ping").addEventListener("click", async () => {
         try {
-          this.showServerBarStatus("Scanning for lowest ping server...", "#3b82f6");
+          this.showServerBarStatus("Finding lowest ping server...", "#BDBEBE");
           const s = await Launcher.joinLowestPingServer(Utils.getPlaceIdFromPage(), accSelect.value);
-          this.showServerBarStatus(`Joining lowest ping server (${s.ping} ms)...`, "#10b981");
+          this.showServerBarStatus(`Joining server (${s.ping} ms)...`, "#00B06F");
         } catch (err) {
-          this.showServerBarStatus(err.message, "#ef4444");
+          this.showServerBarStatus(err.message, "#F74B52");
         }
       });
 
@@ -3553,9 +3899,9 @@
         const liveJob = PlaytimeTracker.getData().activeSession?.gameId;
         if (liveJob) {
           await Utils.copyText(liveJob);
-          this.showServerBarStatus(`Copied your active server JobId: ${liveJob}`, "#10b981");
+          this.showServerBarStatus(`Copied active Job ID: ${liveJob}`, "#00B06F");
         } else {
-          this.showServerBarStatus("No active in-game JobId detected right now (make sure you're in a server and status isn't hidden).", "#f59e0b");
+          this.showServerBarStatus("No active server Job ID detected (ensure you are in an experience and status is visible).", "#BDBEBE");
         }
       });
 
@@ -3574,11 +3920,11 @@
       const bar = document.createElement("div");
       bar.id = "rtk-play-as-bar";
       bar.innerHTML = `
-        <select id="rtk-main-play-acc" class="rtk-srv-select rtk-account-dropdown" style="height:32px;font-size:12px;flex:1;">
+        <select id="rtk-main-play-acc" class="rtk-srv-select rtk-account-dropdown" style="height:34px;font-size:13px;flex:1;max-width:none;">
           ${HubUI.buildAccountOptionsHtml()}
         </select>
-        <button type="button" id="rtk-main-play-as-btn" class="rtk-srv-chip" style="height:32px;background:rgba(0,176,111,0.18);border-color:rgba(0,176,111,0.45);">
-          ▶ Play As Account
+        <button type="button" id="rtk-main-play-as-btn" class="rtk-srv-chip" style="height:34px;padding:0 14px;">
+          ${Icons.play}<span>Play As</span>
         </button>
       `;
 
@@ -3588,7 +3934,7 @@
         const accId = bar.querySelector("#rtk-main-play-acc").value;
         try {
           await Launcher.join(Utils.getPlaceIdFromPage(), null, accId);
-          HubUI.toast("Launching game...", "success");
+          HubUI.toast("Launching Roblox...", "success");
         } catch (err) {
           HubUI.toast(err.message, "error");
         }
@@ -3609,28 +3955,28 @@
         const tools = document.createElement("div");
         tools.className = "rtk-card-tools";
         tools.innerHTML = `
-          <button type="button" class="rtk-srv-chip" data-card-copy="${Utils.escapeHtml(jobId)}" title="${Utils.escapeHtml(jobId)}">📋 JobId</button>
-          <button type="button" class="rtk-srv-chip" data-card-link="${Utils.escapeHtml(jobId)}">🔗 Link</button>
-          <button type="button" class="rtk-srv-chip" data-card-joinas="${Utils.escapeHtml(jobId)}">👤 Join As</button>
+          <button type="button" class="rtk-srv-chip" data-card-copy="${Utils.escapeHtml(jobId)}" title="${Utils.escapeHtml(jobId)}">${Icons.copy}<span>Job ID</span></button>
+          <button type="button" class="rtk-srv-chip" data-card-link="${Utils.escapeHtml(jobId)}">${Icons.link}<span>Link</span></button>
+          <button type="button" class="rtk-srv-chip" data-card-joinas="${Utils.escapeHtml(jobId)}">${Icons.users}<span>Join As</span></button>
         `;
 
         tools.querySelector("[data-card-copy]").addEventListener("click", async () => {
           await Utils.copyText(jobId);
-          HubUI.toast("Copied server Job ID!", "success");
+          HubUI.toast("Copied server Job ID.", "success");
         });
 
         tools.querySelector("[data-card-link]").addEventListener("click", async () => {
           const placeId = Utils.getPlaceIdFromPage();
           const url = `https://www.roblox.com/games/${placeId}/-?serverJobId=${jobId}`;
           await Utils.copyText(url);
-          HubUI.toast("Copied direct ?serverJobId= link!", "success");
+          HubUI.toast("Copied shareable server link.", "success");
         });
 
         tools.querySelector("[data-card-joinas]").addEventListener("click", async () => {
           const srvSelect = document.getElementById("rtk-srv-account");
           const accId = srvSelect ? srvSelect.value : "current";
           if (accId === "current") {
-            HubUI.toast("Tip: Pick a target account in the Job ID bar dropdown at the top of Servers tab, then click Join As!", "info");
+            HubUI.toast("Select a target account in the Servers bar dropdown above to join on another account.", "info");
           }
           try {
             await Launcher.join(Utils.getPlaceIdFromPage(), jobId, accId);
@@ -3674,7 +4020,7 @@
         e.stopPropagation();
 
         const useCleanSwitch = window.confirm(
-          `[RoToolkit Logout Guard]\n\n@${AccountManager.activeUser.name} is saved in your Account Switcher vault!\n\nClicking Roblox's native "Log Out" permanently invalidates your saved .ROBLOSECURITY cookie on Roblox's servers.\n\n• Click OK to safely detach & switch to the Login screen WITHOUT invalidating your saved cookie (Recommended).\n• Click Cancel to abort.`
+          `[Toolkit Logout Protection]\n\n@${AccountManager.activeUser.name} is saved in your Account Switcher.\n\nRoblox's native "Log Out" permanently invalidates your saved .ROBLOSECURITY cookie on Roblox's servers.\n\n• Click OK to safely detach and open the Login page WITHOUT invalidating your saved cookie.\n• Click Cancel to stay signed in. (To permanently log out, remove this account from Toolkit first or disable Logout Protection.)`
         );
 
         if (useCleanSwitch) {
@@ -3702,10 +4048,10 @@
     if (promptData.autoRestore) {
       let cancelled = false;
       HubUI.toast(
-        `Game launched! Restoring browser to @${prevAcc.username} in 5s...`,
+        `Client launched. Restoring @${prevAcc.username} in 5s...`,
         "info",
         {
-          label: "Stay Here",
+          label: "Cancel",
           onClick: () => {
             cancelled = true;
           },
@@ -3719,10 +4065,10 @@
       }, 5000);
     } else {
       HubUI.toast(
-        `Launched on @${AccountManager.activeUser?.name || "alt"}.`,
+        `Joined as @${AccountManager.activeUser?.name || "alt"}.`,
         "info",
         {
-          label: `Back to @${prevAcc.username}`,
+          label: `Switch back to @${prevAcc.username}`,
           onClick: () => AccountManager.switchToAccount(prevAcc.userId),
         },
         12000
@@ -3736,7 +4082,6 @@
     GamePageUI.tickDomEnhancements();
     setupLogoutGuard();
 
-    // Debounced MutationObserver for Roblox's React SPA navigation & tab switches
     let rafScheduled = false;
     const observer = new MutationObserver(() => {
       if (rafScheduled) return;
@@ -3748,7 +4093,6 @@
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    // Cross-tab vault synchronization
     Store.onChange(STORAGE_KEYS.ACCOUNTS, () => {
       GamePageUI.refreshAccountSelectors();
       if (HubUI.isOpen && HubUI.activeTab === "accounts") HubUI.renderActiveTab();
